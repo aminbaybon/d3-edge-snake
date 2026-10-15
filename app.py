@@ -5,25 +5,28 @@ import io
 import json
 import sys
 import threading
+import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from agent import decide, format_raw, load_model
+from policy import greedy_move, plan_move
 from render import render_board
-from snake import FA_DIR, SnakeGame, to_fa_digits
+from rl_agent import WEIGHTS, dqn_move, load_qnet
+from snake import Direction, SnakeGame
 
-DEATH_FA = {
-    "wall": "برخورد با دیوار",
-    "self": "برخورد با بدن خودش",
-    "win": "کل صفحه پر شد — برد",
+DEATH = {
+    "wall": "hit a wall",
+    "self": "hit its own body",
+    "win": "board filled — win",
 }
 
 ROOT = Path(__file__).resolve().parent
 LOCK = threading.Lock()
 STATE: dict = {
-    "status": "آماده",
+    "status": "Ready",
     "log": [],
     "running": False,
     "summary": None,
@@ -37,6 +40,54 @@ STATE: dict = {
 }
 FRAME: bytes = b""
 STOP = threading.Event()
+POLICIES = ("plan", "dqn", "d3", "greedy")
+POLICY_LABEL = {
+    "plan": "Search",
+    "dqn": "Double DQN",
+    "d3": "d3-edge",
+    "greedy": "Greedy",
+}
+_DQN: tuple | None = None
+
+
+def _certain(move: Direction) -> dict[str, float]:
+    return {direction.value: (1.0 if direction is move else 0.0) for direction in Direction}
+
+
+def ensure_dqn():
+    global _DQN
+    if _DQN is None:
+        _DQN = load_qnet(WEIGHTS)
+    return _DQN
+
+
+def choose_move(game: SnakeGame, policy: str, use_image: bool) -> tuple[Direction, dict[str, float], float, str]:
+    started = time.perf_counter()
+    if policy == "d3":
+        image = render_board(game) if use_image else None
+        decision = decide(game, image)
+        return decision.move, decision.probabilities, decision.latency_s, format_raw(decision)
+    if policy == "greedy":
+        move = greedy_move(game)
+        probs = _certain(move)
+        note = ""
+    elif policy == "dqn":
+        try:
+            net, board, device = ensure_dqn()
+        except FileNotFoundError:
+            move, probs = plan_move(game)
+            note = "DQN weights are missing; search played this move."
+            return move, probs, time.perf_counter() - started, note
+        if game.size != board:
+            move, probs = plan_move(game)
+            note = f"DQN was trained for a {board} board; search played this move."
+        else:
+            move, probs = dqn_move(net, game, device)
+            note = ""
+    else:
+        move, probs = plan_move(game)
+        note = ""
+    return move, probs, time.perf_counter() - started, note
 
 
 def encode_png(game: SnakeGame, last_move: str = "", last_p: float | None = None) -> bytes:
@@ -66,81 +117,95 @@ def snapshot(game: SnakeGame) -> dict:
         "score": game.score,
         "steps": game.steps,
         "length": game.length,
-        "heading": FA_DIR[game.heading],
+        "heading": game.heading.value,
         "alive": game.alive,
-        "death": DEATH_FA.get(game.death, game.death),
+        "death": DEATH.get(game.death, game.death),
         "food": rel,
-        "head": f"{to_fa_digits(hx)}، {to_fa_digits(hy)}",
+        "head": f"{hx}, {hy}",
     }
 
 
-def run_episode(seed: int, size: int, max_steps: int, use_image: bool) -> None:
+def run_episode(seed: int, size: int, max_steps: int, use_image: bool, policy: str = "plan") -> None:
     global FRAME
     try:
+        if policy not in POLICIES:
+            policy = "plan"
         with LOCK:
-            STATE.update({"status": "بارگذاری مدل d3-edge…", "running": True, "log": [], "summary": None, "raw": ""})
+            STATE.update({
+                "status": f"Starting with {POLICY_LABEL[policy]}…",
+                "running": True,
+                "log": [],
+                "summary": None,
+                "raw": "",
+                "policy": policy,
+            })
         game = SnakeGame(size=size, seed=seed)
         with LOCK:
             FRAME = encode_png(game)
             STATE["stats"] = snapshot(game)
             STATE["board"] = board_payload(game)
-        load_model()
-        with LOCK:
-            STATE["status"] = "مدل آماده شد. بازی شروع می‌شود."
+        if policy == "d3":
+            load_model()
+            with LOCK:
+                STATE["status"] = "Model ready. The game is starting."
         history = []
         last_move = ""
         last_p = None
-        while game.alive and game.steps < max_steps and not STOP.is_set():
-            image = render_board(game)
-            greedy = FA_DIR[game.greedy_hint()]
-            decision = decide(game, image if use_image else None)
-            applied = game.step(decision.move)
-            last_move, last_p = FA_DIR[applied], decision.confidence
+        while game.alive and not STOP.is_set() and (max_steps <= 0 or game.steps < max_steps):
+            greedy = game.greedy_hint().value
+            move, probs, latency, note = choose_move(game, policy, use_image)
+            applied = game.step(move)
+            last_move, last_p = applied.value, float(probs.get(applied.value, 0.0))
             png = encode_png(game, last_move=last_move, last_p=last_p)
             line = (
-                f"{to_fa_digits(game.steps)}. {FA_DIR[applied]} "
-                f"({to_fa_digits(round(decision.confidence * 100, 1))}٪، "
-                f"{to_fa_digits(round(decision.latency_s, 2))} ث)"
+                f"{game.steps}. {applied.value} "
+                f"({round(last_p * 100, 1)}%, {round(latency, 2)}s)"
             )
             if not game.alive:
-                line += f" — پایان: {DEATH_FA.get(game.death, game.death)}"
+                line += f" — end: {DEATH.get(game.death, game.death)}"
             row = {
                 "step": game.steps,
                 "move": applied.value,
-                "move_fa": FA_DIR[applied],
-                "confidence": round(decision.confidence, 4),
-                "probs": decision.probabilities,
+                "move_fa": applied.value,
+                "confidence": round(float(probs.get(applied.value, 0.0)), 4),
+                "probs": probs,
                 "greedy": greedy,
                 "score": game.score,
-                "latency_s": round(decision.latency_s, 3),
+                "latency_s": round(latency, 3),
+                "policy": policy,
             }
             history.append(row)
             print(
-                f"{game.steps:02d} {applied.value:6}  p={decision.confidence:.2f}  "
-                f"score={game.score}  {decision.latency_s:.1f}s",
+                f"{game.steps:02d} {applied.value:6}  p={probs.get(applied.value, 0):.2f}  "
+                f"score={game.score}  {latency:.3f}s  {policy}",
                 flush=True,
             )
             with LOCK:
                 FRAME = png
+                status = f"{POLICY_LABEL[policy]} — step {game.steps} — {applied.value}"
+                if note:
+                    status = f"{status} — {note}"
                 STATE.update(
                     {
-                        "status": f"قدم {to_fa_digits(game.steps)} — {FA_DIR[applied]}",
-                        "log": STATE["log"] + [line],
-                        "probs": decision.probabilities,
-                        "move_fa": FA_DIR[applied],
-                        "confidence": decision.confidence,
-                        "latency": decision.latency_s,
-                        "raw": format_raw(decision),
+                        "status": status,
+                        "log": (STATE["log"] + [line])[-24:],
+                        "probs": probs,
+                        "move_fa": applied.value,
+                        "confidence": float(probs.get(applied.value, 0.0)),
+                        "latency": latency,
+                        "raw": note,
                         "stats": snapshot(game),
                         "board": board_payload(game),
                     }
                 )
+            if policy != "d3":
+                time.sleep(0.68)
         if STOP.is_set() and game.alive:
-            ending = "متوقف شد"
-        elif game.alive:
-            ending = f"به سقف {to_fa_digits(max_steps)} قدم رسید"
+            ending = "stopped"
+        elif game.alive and max_steps > 0:
+            ending = f"reached the {max_steps}-step cap"
         else:
-            ending = DEATH_FA.get(game.death, game.death)
+            ending = DEATH.get(game.death, game.death)
         summary = {
             "seed": seed,
             "size": size,
@@ -150,7 +215,8 @@ def run_episode(seed: int, size: int, max_steps: int, use_image: bool) -> None:
             "alive": game.alive,
             "death": game.death,
             "death_fa": ending,
-            "used_image": use_image,
+            "used_image": use_image and policy == "d3",
+            "policy": policy,
             "history": history,
         }
         run_dir = ROOT / "run"
@@ -160,7 +226,7 @@ def run_episode(seed: int, size: int, max_steps: int, use_image: bool) -> None:
         with LOCK:
             STATE.update(
                 {
-                    "status": f"نتیجه: {ending} — امتیاز {to_fa_digits(game.score)} از {to_fa_digits(game.steps)} قدم",
+                    "status": f"Result: {ending} — score {game.score} in {game.steps} steps",
                     "running": False,
                     "summary": summary,
                     "board": board_payload(game),
@@ -169,7 +235,7 @@ def run_episode(seed: int, size: int, max_steps: int, use_image: bool) -> None:
     except Exception as exc:
         traceback.print_exc()
         with LOCK:
-            STATE.update({"status": f"خطا: {exc}", "running": False, "raw": traceback.format_exc()})
+            STATE.update({"status": f"Error: {exc}", "running": False, "raw": traceback.format_exc()})
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -203,6 +269,7 @@ class Handler(BaseHTTPRequestHandler):
                     "latency": STATE["latency"],
                     "board": STATE["board"],
                     "stats": STATE["stats"],
+                    "policy": STATE.get("policy", "plan"),
                     "summary": None
                     if STATE["summary"] is None
                     else {k: v for k, v in STATE["summary"].items() if k != "history"},
@@ -215,11 +282,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, b'{"ok":false}', "application/json")
                 return
             STOP.clear()
+            requested = q.get("policy", ["plan"])[0]
             args = (
                 int(q.get("seed", ["7"])[0]),
                 int(q.get("size", ["8"])[0]),
-                int(q.get("max_steps", ["25"])[0]),
+                0,
                 q.get("image", ["1"])[0] != "0",
+                requested if requested in POLICIES else "plan",
             )
             threading.Thread(target=run_episode, args=args, daemon=True).start()
             self._send(200, b'{"ok":true}', "application/json")
@@ -236,9 +305,9 @@ class Handler(BaseHTTPRequestHandler):
         super().log_message(fmt, *args)
 
 
-def run_headless(seed: int, size: int, max_steps: int, use_image: bool) -> dict:
+def run_headless(seed: int, size: int, max_steps: int, use_image: bool, policy: str) -> dict:
     STOP.clear()
-    run_episode(seed, size, max_steps, use_image)
+    run_episode(seed, size, max_steps, use_image, policy)
     return STATE.get("summary") or {}
 
 
@@ -246,12 +315,13 @@ def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    parser = argparse.ArgumentParser(description="Snake played by vllm-sr/d3-edge")
+    parser = argparse.ArgumentParser(description="Snake played on a grid action space")
     parser.add_argument("--episode", action="store_true")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--size", type=int, default=8)
-    parser.add_argument("--max-steps", type=int, default=25)
+    parser.add_argument("--max-steps", type=int, default=0, help="0 plays until the board is full or the snake dies")
     parser.add_argument("--no-image", action="store_true")
+    parser.add_argument("--policy", choices=POLICIES, default="plan")
     parser.add_argument("--port", type=int, default=7860)
     args = parser.parse_args()
     game = SnakeGame(size=args.size, seed=args.seed)
@@ -260,11 +330,13 @@ def main() -> None:
     STATE["stats"] = snapshot(game)
     STATE["board"] = board_payload(game)
     if args.episode:
-        summary = run_headless(args.seed, args.size, args.max_steps, use_image=not args.no_image)
+        summary = run_headless(
+            args.seed, args.size, args.max_steps, use_image=not args.no_image, policy=args.policy
+        )
         print(json.dumps({k: v for k, v in summary.items() if k != "history"}, ensure_ascii=False, indent=2))
         return
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    print(f"باز کن: http://127.0.0.1:{args.port}", flush=True)
+    print(f"Open http://127.0.0.1:{args.port}", flush=True)
     server.serve_forever()
 
 

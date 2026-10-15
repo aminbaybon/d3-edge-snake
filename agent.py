@@ -6,7 +6,7 @@ from typing import Any
 
 from PIL import Image
 
-from snake import Direction, FA_DIR, SnakeGame, parse_direction, to_fa_digits
+from snake import Direction, SnakeGame, parse_direction
 
 MODEL_ID = "vllm-sr/d3-edge"
 
@@ -32,23 +32,23 @@ def build_state(game: SnakeGame) -> dict[str, Any]:
     fx, fy = game.food
     _, _, rel = game.relative_food()
     return {
-        "بازی": "مار (Snake)",
-        "هدف": "سیب را بخور. به دیوار و به بدن مار برخورد نکن. برگشت ۱۸۰ درجه ممنوع است.",
-        "اندازه_صفحه": game.size,
-        "دستگاه_مختصات": "ستون ۰ سمت چپ است و به راست زیاد می‌شود. ردیف ۰ بالای صفحه است و به پایین زیاد می‌شود.",
-        "سر": {"ستون": hx, "ردیف": hy},
-        "بدن": [{"ستون": x, "ردیف": y} for x, y in game.snake],
-        "سیب": {"ستون": fx, "ردیف": fy},
-        "جهت_فعلی": FA_DIR[game.heading],
+        "game": "Snake",
+        "goal": "Eat the apple. Do not hit a wall or the snake's body. A 180-degree reversal is illegal.",
+        "board_size": game.size,
+        "coordinates": "Column 0 is the left edge and increases to the right. Row 0 is the top edge and increases downward.",
+        "head": {"column": hx, "row": hy},
+        "body": [{"column": x, "row": y} for x, y in game.snake],
+        "apple": {"column": fx, "row": fy},
+        "heading_label": game.heading.value,
         "heading": game.heading.value,
-        "سیب_نسبت_به_سر": rel,
-        "امتیاز": game.score,
-        "طول": game.length,
-        "قدم": game.steps,
-        "حرکت‌های_مجاز": [FA_DIR[d] for d in game.legal_moves()],
+        "apple_relative_to_head": rel,
+        "score": game.score,
+        "length": game.length,
+        "step": game.steps,
+        "legal_move_labels": [d.value for d in game.legal_moves()],
         "legal_moves": [d.value for d in game.legal_moves()],
         "ascii_board": game.ascii_board(),
-        "یادآوری_تصویر": "در تصویر، سر مار زرد است، بدن سبز است، سیب قرمز است، و برچسب‌ها فارسی هستند.",
+        "image_reminder": "In the image the head is yellow, the body is green, the apple is red, and the labels are English.",
     }
 
 
@@ -57,15 +57,15 @@ def build_questions(game: SnakeGame) -> dict[str, Any]:
     for move in game.legal_moves():
         nx, ny = game.next_cell(move)
         criteria[move.value] = (
-            f"{FA_DIR[move]} — سر مار می‌رود به ستون {to_fa_digits(nx)} ردیف {to_fa_digits(ny)}"
+            f"{move.value} — the head moves to column {nx} row {ny}"
         )
     return {
         "move": {
             "type": "choice",
             "instructions": (
-                "با نگاه به تصویر فارسی صفحه بازی و وضعیت JSON، "
-                "مار باید الان کدام حرکت را انجام دهد تا به سیب نزدیک شود "
-                "و به دیوار یا بدن خودش نخورد؟ فقط یکی از گزینه‌ها را انتخاب کن."
+                "Looking at the board image and the JSON state, "
+                "which move should the snake make now so it gets closer to the apple "
+                "without hitting a wall or its own body? Choose exactly one option."
             ),
             "criteria": criteria,
         }
@@ -121,6 +121,22 @@ def _choice_from_answer(answer: Any, legal: list[Direction]) -> tuple[Direction 
         else:
             picked = None
     return picked, probs
+
+
+def _force_fp16_runtime(root: str) -> None:
+    """GTX 16-series cannot run bfloat16. The runtime hardcodes that dtype."""
+    import os
+
+    path = os.path.join(root, "d3_runtime.py")
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read()
+    needle = "dtype=torch.bfloat16,"
+    if needle not in text:
+        return
+    text = text.replace(needle, "dtype=torch.float16,", 1)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    print("Patched d3 runtime to float16 for this GPU.", flush=True)
 
 
 def _patch_broken_scientific_stack() -> None:
@@ -180,16 +196,34 @@ def load_model():
 
         _patch_broken_scientific_stack()
 
-        threads = max(1, (os.cpu_count() or 4) // 2)
-        torch.set_num_threads(threads)
-        print(f"Loading {MODEL_ID} on CPU with {threads} threads...", flush=True)
+        if torch.cuda.is_available():
+            device = "cuda:0"
+            name = torch.cuda.get_device_name(0)
+            major, _minor = torch.cuda.get_device_capability(0)
+            # Turing and older have no bfloat16 CUDA kernels. d3-edge ships BF16.
+            if major < 8:
+                os.environ["D3_EDGE_FORCE_FP16"] = "1"
+            print(f"Loading {MODEL_ID} on {name} ({device})...", flush=True)
+        else:
+            device = "cpu"
+            threads = max(1, (os.cpu_count() or 4) // 2)
+            torch.set_num_threads(threads)
+            print(f"Loading {MODEL_ID} on CPU with {threads} threads...", flush=True)
         root = snapshot_download(MODEL_ID)
+        if os.environ.get("D3_EDGE_FORCE_FP16") == "1":
+            _force_fp16_runtime(root)
         if root not in sys.path:
             sys.path.insert(0, root)
         from d3_runtime import D3
 
-        _model = D3.from_pretrained(root, device="cpu", verify="fast")
-        print("Model ready.", flush=True)
+        # The fp16 edit changes d3_runtime.py, so the manifest hash no longer matches.
+        verify = "none" if os.environ.get("D3_EDGE_FORCE_FP16") == "1" else "fast"
+        _model = D3.from_pretrained(root, device=device, verify=verify)
+        if device.startswith("cuda"):
+            allocated = torch.cuda.memory_allocated() / (1024 ** 3)
+            print(f"Model ready on GPU ({allocated:.2f} GiB allocated).", flush=True)
+        else:
+            print("Model ready.", flush=True)
         return _model
     except Exception as exc:
         _load_error = str(exc)
@@ -225,7 +259,7 @@ def decide(game: SnakeGame, board_image: Image.Image | None) -> Decision:
 def format_raw(decision: Decision) -> str:
     payload = {
         "move": decision.move.value,
-        "fa": FA_DIR[decision.move],
+        "label": decision.move.value,
         "probabilities": decision.probabilities,
         "latency_s": round(decision.latency_s, 3),
         "answers": decision.raw.get("answers", decision.raw),

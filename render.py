@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-from snake import FA_DIR, Direction, SnakeGame, to_fa_digits
+from snake import Direction, SnakeGame
 
 BG = (8, 14, 22)
 FIELD = (12, 28, 22)
@@ -82,15 +82,15 @@ def render_board(game: SnakeGame, last_move: str = "", last_p: float | None = No
     draw = ImageDraw.Draw(img)
 
     draw.rounded_rectangle([12, 12, width - 12, hud - 4], radius=16, fill=HUD)
-    _text(draw, (28, hud / 2), "مار", fill=HEAD, size=22, anchor="lm")
+    _text(draw, (28, hud / 2), "Snake", fill=HEAD, size=22, anchor="lm")
     chips = [
-        f"امتیاز {to_fa_digits(game.score)}",
-        f"قدم {to_fa_digits(game.steps)}",
-        FA_DIR[game.heading],
+        f"score {game.score}",
+        f"step {game.steps}",
+        game.heading.value,
     ]
     if last_move:
-        conf = to_fa_digits(int(round((last_p or 0) * 100)))
-        chips.append(f"{last_move} {conf}٪")
+        conf = int(round((last_p or 0) * 100))
+        chips.append(f"{last_move} {conf}%")
     x = width - 28
     for chip in reversed(chips):
         _text(draw, (x, hud / 2), chip, fill=INK, size=16, anchor="rm")
@@ -159,9 +159,9 @@ def render_board(game: SnakeGame, last_move: str = "", last_p: float | None = No
         od.rounded_rectangle([ox - 8, oy - 8, ox + board + 8, oy + board + 8], radius=22, fill=(6, 10, 16, 150))
         img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
         draw = ImageDraw.Draw(img)
-        msg = "برد!" if game.death == "win" else "تمام شد"
+        msg = "Won" if game.death == "win" else "Game over"
         _text(draw, (ox + board / 2, oy + board / 2 - 8), msg, fill=HEAD if game.death == "win" else (255, 130, 130), size=36, anchor="mm")
-        detail = {"wall": "برخورد با دیوار", "self": "برخورد با بدن", "win": "صفحه پر شد"}.get(game.death, "")
+        detail = {"wall": "hit a wall", "self": "hit itself", "win": "board filled"}.get(game.death, "")
         if detail:
             _text(draw, (ox + board / 2, oy + board / 2 + 28), detail, fill=MUTED, size=16, anchor="mm")
 

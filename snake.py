@@ -139,17 +139,17 @@ class SnakeGame:
         dx, dy = fx - hx, fy - hy
         parts: list[str] = []
         if dx > 0:
-            parts.append(f"{to_fa_digits(dx)} خانه راست")
+            parts.append(f"{dx} right")
         elif dx < 0:
-            parts.append(f"{to_fa_digits(-dx)} خانه چپ")
+            parts.append(f"{-dx} left")
         if dy > 0:
-            parts.append(f"{to_fa_digits(dy)} خانه پایین")
+            parts.append(f"{dy} down")
         elif dy < 0:
-            parts.append(f"{to_fa_digits(-dy)} خانه بالا")
+            parts.append(f"{-dy} up")
         if not parts:
-            text = "روی سر مار است"
+            text = "on the head"
         else:
-            text = " و ".join(parts)
+            text = " and ".join(parts)
         return dx, dy, text
 
     def ascii_board(self) -> str:
