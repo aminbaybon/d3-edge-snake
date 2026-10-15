@@ -1,0 +1,10 @@
+transformers==5.17.0
+torchvision
+accelerate
+opencv-python-headless
+safetensors
+gradio>=5.0
+arabic-reshaper
+python-bidi
+pillow
+huggingface_hub

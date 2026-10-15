@@ -1,0 +1,8 @@
+.venv/
+_vendor/
+__pycache__/
+*.pyc
+run/
+run_preview.png
+.idea/
+.vscode/

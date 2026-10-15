@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>مار تصمیم‌گیر — d3-edge</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;600;800&display=swap" rel="stylesheet"/>
+  <style>
+    :root {
+      --bg: #071018;
+      --panel: #101826;
+      --ink: #eef3f8;
+      --muted: #93a4b8;
+      --accent: #8b7cff;
+      --good: #3dd68c;
+      --food: #ff5a5f;
+      --head: #ffdd5a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Vazirmatn, Tahoma, sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(900px 500px at 90% -10%, #2a1858 0%, transparent 55%),
+        radial-gradient(700px 420px at 0% 100%, #0d3a2a 0%, transparent 50%),
+        var(--bg);
+    }
+    main { max-width: 1080px; margin: 0 auto; padding: 24px 16px 48px; }
+    h1 { margin: 0; font-size: 30px; font-weight: 800; }
+    .sub { color: var(--muted); line-height: 1.8; margin: 8px 0 18px; }
+    .controls {
+      display: flex; flex-wrap: wrap; gap: 10px; align-items: end;
+      background: rgba(16,24,38,.86); border: 1px solid #243247;
+      border-radius: 16px; padding: 12px; margin-bottom: 14px;
+    }
+    label { display: flex; flex-direction: column; gap: 5px; color: var(--muted); font-size: 12px; }
+    input, button { font-family: inherit; }
+    input[type=number] {
+      width: 92px; background: #0b1220; color: var(--ink);
+      border: 1px solid #31425d; border-radius: 10px; padding: 8px 10px;
+    }
+    button {
+      background: var(--accent); color: #12081f; border: 0; border-radius: 12px;
+      padding: 10px 16px; font-weight: 800; cursor: pointer;
+    }
+    button.ghost { background: #223049; color: var(--ink); }
+    button:disabled { opacity: .5; cursor: wait; }
+    .layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; }
+    .stage-wrap {
+      background: #0a1511;
+      border: 8px solid #1b2a24;
+      border-radius: 28px;
+      box-shadow: 0 18px 50px rgba(0,0,0,.35), inset 0 0 0 2px #2d4a3c;
+      padding: 12px;
+      position: relative;
+    }
+    canvas { width: 100%; height: auto; display: block; border-radius: 18px; background: #07140f; }
+    .hud {
+      display: flex; justify-content: space-between; gap: 8px; margin-bottom: 10px;
+      font-weight: 700;
+    }
+    .chip {
+      background: #12201a; border: 1px solid #2a4638; border-radius: 999px;
+      padding: 6px 12px; font-size: 13px; color: #d7efe4;
+    }
+    .chip b { color: var(--head); }
+    .side { background: rgba(16,24,38,.9); border: 1px solid #243247; border-radius: 18px; padding: 14px; }
+    .pads { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 10px 0 16px; }
+    .pad {
+      border-radius: 12px; padding: 10px 8px; text-align: center;
+      background: #121b2b; border: 1px solid #2a3a55;
+    }
+    .pad.active { background: #1d3b2c; border-color: var(--good); color: var(--good); }
+    .pad .p { display: block; font-size: 18px; font-weight: 800; }
+    .log { max-height: 180px; overflow: auto; line-height: 1.8; color: #d5def0; font-size: 13px; }
+    #status { color: var(--muted); min-height: 1.6em; }
+    @media (max-width: 860px) { .layout { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>مار تصمیم‌گیر</h1>
+  <p class="sub">مدل d3-edge صفحه را می‌بیند و جهت بعدی را انتخاب می‌کند. انسان بازی نمی‌کند.</p>
+  <div class="controls">
+    <label>بذر<input id="seed" type="number" value="7"></label>
+    <label>اندازه<input id="size" type="number" value="8" min="6" max="12"></label>
+    <label>سقف قدم<input id="steps" type="number" value="25" min="3" max="80"></label>
+    <label style="flex-direction:row; align-items:center; gap:8px;"><input id="image" type="checkbox" checked> تصویر برای مدل</label>
+    <button id="start">شروع بازی</button>
+    <button id="stop" class="ghost">توقف</button>
+  </div>
+  <p id="status">آماده.</p>
+  <div class="layout">
+    <div class="stage-wrap">
+      <div class="hud">
+        <span class="chip">امتیاز <b id="score">۰</b></span>
+        <span class="chip">قدم <b id="stepsHud">۰</b></span>
+        <span class="chip">جهت <b id="dirHud">راست</b></span>
+      </div>
+      <canvas id="stage" width="720" height="720"></canvas>
+    </div>
+    <aside class="side">
+      <h3>تصمیم مدل</h3>
+      <div class="pads">
+        <div class="pad" id="pad-up">بالا<span class="p">۰٪</span></div>
+        <div class="pad" id="pad-right">راست<span class="p">۰٪</span></div>
+        <div class="pad" id="pad-down">پایین<span class="p">۰٪</span></div>
+        <div class="pad" id="pad-left">چپ<span class="p">۰٪</span></div>
+      </div>
+      <h3>تاریخچه</h3>
+      <div class="log" id="log"></div>
+    </aside>
+  </div>
+</main>
+<script>
+const labels = {up:"بالا", down:"پایین", left:"چپ", right:"راست"};
+const fa = n => String(n).replace(/\d/g, d => "۰۱۲۳۴۵۶۷۸۹"[d]);
+let lastBoard = null;
+let anim = { from: null, to: null, t: 1 };
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+function draw(board, t = 1) {
+  const c = document.getElementById("stage");
+  const ctx = c.getContext("2d");
+  const n = board.size;
+  const pad = 18;
+  const cell = (c.width - pad * 2) / n;
+  ctx.clearRect(0, 0, c.width, c.height);
+  ctx.fillStyle = "#07140f";
+  ctx.fillRect(0, 0, c.width, c.height);
+
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      ctx.fillStyle = (x + y) % 2 ? "#123526" : "#0e2b1e";
+      roundRect(ctx, pad + x * cell + 3, pad + y * cell + 3, cell - 6, cell - 6, 10);
+      ctx.fill();
+    }
+  }
+
+  const snake = interpolateSnake(board, t);
+  const food = board.food;
+  const ax = pad + food[0] * cell + cell / 2;
+  const ay = pad + food[1] * cell + cell / 2;
+  const g = ctx.createRadialGradient(ax, ay, 2, ax, ay, cell * 0.45);
+  g.addColorStop(0, "rgba(255,90,90,.45)");
+  g.addColorStop(1, "rgba(255,90,90,0)");
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(ax, ay, cell * 0.42, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#ff5a5f";
+  ctx.beginPath(); ctx.arc(ax, ay, cell * 0.22, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#ffc4bf";
+  ctx.beginPath(); ctx.arc(ax - 5, ay - 6, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#4fd37a";
+  ctx.beginPath();
+  ctx.moveTo(ax + 2, ay - cell * 0.22);
+  ctx.quadraticCurveTo(ax + 14, ay - cell * 0.38, ax + 2, ay - cell * 0.12);
+  ctx.fill();
+
+  if (snake.length) {
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = cell * 0.62;
+    ctx.strokeStyle = "#27c56f";
+    ctx.beginPath();
+    snake.forEach((p, i) => {
+      const x = pad + p[0] * cell + cell / 2;
+      const y = pad + p[1] * cell + cell / 2;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    const head = snake[snake.length - 1];
+    const hx = pad + head[0] * cell + cell / 2;
+    const hy = pad + head[1] * cell + cell / 2;
+    ctx.fillStyle = "#ffe37a";
+    ctx.beginPath(); ctx.arc(hx, hy, cell * 0.34, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#ffd24a";
+    ctx.beginPath(); ctx.arc(hx, hy, cell * 0.28, 0, Math.PI * 2); ctx.fill();
+    const eyes = {up:[[-8,-9],[8,-9]], down:[[-8,9],[8,9]], left:[[-10,-7],[-10,7]], right:[[10,-7],[10,7]]}[board.heading] || [[10,-7],[10,7]];
+    eyes.forEach(([ex, ey]) => {
+      ctx.fillStyle = "#1d2428";
+      ctx.beginPath(); ctx.arc(hx + ex, hy + ey, 3.3, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#fff";
+      ctx.beginPath(); ctx.arc(hx + ex - 1, hy + ey - 1.2, 1.1, 0, Math.PI * 2); ctx.fill();
+    });
+  }
+
+  if (board.alive === false) {
+    ctx.fillStyle = "rgba(5,10,14,.55)";
+    roundRect(ctx, pad - 4, pad - 4, c.width - pad * 2 + 8, c.height - pad * 2 + 8, 18);
+    ctx.fill();
+    ctx.fillStyle = board.death === "win" ? "#ffdd5a" : "#ff8d8d";
+    ctx.font = "800 42px Vazirmatn, Tahoma";
+    ctx.textAlign = "center";
+    ctx.fillText(board.death === "win" ? "برد!" : "تمام شد", c.width / 2, c.height / 2);
+  }
+}
+
+function interpolateSnake(board, t) {
+  const cur = board.snake || [];
+  if (!anim.from || t >= 1) return cur.map(p => [p[0], p[1]]);
+  const prev = anim.from.snake || [];
+  const n = Math.max(prev.length, cur.length);
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const a = prev[Math.min(i, prev.length - 1)] || cur[0];
+    const b = cur[Math.min(i, cur.length - 1)] || a;
+    out.push([lerp(a[0], b[0], t), lerp(a[1], b[1], t)]);
+  }
+  return out;
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function setPads(probs, move) {
+  ["up","right","down","left"].forEach(k => {
+    const el = document.getElementById("pad-" + k);
+    const p = Math.round(((probs && probs[k]) || 0) * 100);
+    el.classList.toggle("active", k === move);
+    el.querySelector(".p").textContent = fa(p) + "٪";
+  });
+}
+
+function sameBoard(a, b) {
+  return JSON.stringify(a && a.snake) === JSON.stringify(b && b.snake) && JSON.stringify(a && a.food) === JSON.stringify(b && b.food);
+}
+
+async function tick() {
+  const s = await (await fetch("/api/state")).json();
+  document.getElementById("status").textContent = s.status;
+  document.getElementById("start").disabled = s.running;
+  const b = s.board;
+  if (b) {
+    document.getElementById("score").textContent = fa(b.score ?? 0);
+    document.getElementById("stepsHud").textContent = fa(b.steps ?? 0);
+    document.getElementById("dirHud").textContent = labels[b.heading] || b.heading || "—";
+    if (!sameBoard(lastBoard, b)) {
+      anim = { from: lastBoard, to: b, t: 0 };
+      lastBoard = b;
+    }
+    draw(b, anim.t);
+  }
+  const moveKey = Object.entries(labels).find(([, v]) => v === s.move_fa)?.[0];
+  setPads(s.probs, moveKey);
+  document.getElementById("log").innerHTML = (s.log || []).slice().reverse().map(x => `<div>${x}</div>`).join("");
+}
+
+function animate() {
+  if (anim.t < 1) {
+    anim.t = Math.min(1, anim.t + 0.12);
+    if (lastBoard) draw(lastBoard, anim.t);
+  }
+  requestAnimationFrame(animate);
+}
+
+document.getElementById("start").onclick = () => fetch("/api/start?" + new URLSearchParams({
+  seed: seed.value, size: size.value, max_steps: steps.value, image: image.checked ? "1" : "0"
+}));
+document.getElementById("stop").onclick = () => fetch("/api/stop");
+setInterval(tick, 400);
+animate();
+tick();
+</script>
+</body>
+</html>
