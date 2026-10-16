@@ -95,42 +95,26 @@
 <main>
   <article class="report">
     <h1>Decision Snake</h1>
-    <p class="sub">I gave the downloaded d3-edge model the board as coordinates and let reinforcement learning step in only when the path was stuck. The clip is the game that filled the board, seed 7, score 61. It is sped up. On this page each cell stays up, because the fast moves used to vanish before they were drawn.</p>
-    <img class="play" src="/play.gif" alt="The winning game, every move, played back faster than the live page">
+    <p class="sub"><a href="https://huggingface.co/vllm-sr/d3-edge">d3-edge</a> came out on 10 October 2026. I gave it a snake game. The clip is the run that filled the board: 8×8, seed 7, score 61.</p>
+    <img class="play" src="/play.gif" alt="The winning game, every move">
 
-    <h2>What I set out to do</h2>
-    <p>Each turn d3-edge reads the board as coordinates: the body, the path the head has walked since the last apple, and what each move does — closer or farther, empty, apple, body, wall, or a cell already left. Reinforcement learning steps in when that path starts repeating, or when the next step would close the way back to the tail. If the network cannot get closer without closing that way, search finishes the chase and then hands the board back. Press Start and that is what plays.</p>
-
-    <h2>The model</h2>
-    <p><a href="https://huggingface.co/vllm-sr/d3-edge">d3-edge</a> is a decision model of about 0.8 billion parameters, built on Qwen3.5. It accepts text on its own, so the board is a matrix: row 0 is the top, column 0 is the left, and each cell is empty, head, body, or apple. On the GTX 1650 the weights load in float16 and occupy 1.11 GB. A text decision in the winning game took 1.3 seconds on average.</p>
-    <p>I tried the same opening, an 8×8 board with seed 7, both ways. From the picture the model chose right four times and hit the wall. From the coordinate matrix its own first choice was up, toward the apple, and the next choice ate it. After four moves the score was 1 and the snake was alive.</p>
-
-    <h2>Reinforcement learning</h2>
-    <p>At each step the snake has three legal moves: turn left, go straight, or turn right. Reversing is illegal. For that kind of choice, Double DQN fits. It keeps every step and learns from it again. Training the 0.8B model itself was out of reach on a 4 GB GPU: one decision takes well over a second, the training activations do not fit, and the decision layer is a readout over labels. The model stayed frozen.</p>
-    <p>I used its recorded preferences as a teacher in two ways. During training, the reward was shifted toward the direction the model preferred. At decision time, that preference was added to the network's own score. Both versions played worse. The rewarded network averaged 0.4 and died immediately. The decision-time mix stayed alive and almost never ate, because the recorded model had given left turns almost no weight.</p>
-    <p>Double DQN on its own reached an average score of about 16, close to a plain rule that steps toward the apple when the next cell is safe (about 18). Two earlier runs never got there. One reward punished eating, because the next apple is usually farther away. Another showed the network the whole board as a flat list, which does not say whether the next move dies. With a few facts about the three legal moves, the same network reached a score of about 15. The learning method had been fine. The reward and the inputs had been wrong.</p>
-
-    <h2>What we measured</h2>
-    <p>These numbers are from the trials that decided how to combine the two. Forcing the network to imitate the model lowered its score from about 16 to about 0. Search, which never calls the model, scored 56 and filled 15 of 30 boards. It remains in the menu. The default calls it only when the network cannot get closer without trapping the tail.</p>
+    <h2>What I tried, and what happened</h2>
     <table>
-      <thead><tr><th>Player</th><th>Average</th><th>What happened</th></tr></thead>
+      <thead><tr><th>Setup</th><th>Result</th></tr></thead>
       <tbody>
-        <tr><td>d3-edge, the recorded game</td><td>0</td><td>Hit the wall on step 4</td></tr>
-        <tr><td>DQN trained toward the model</td><td>0.4</td><td>Died immediately</td></tr>
-        <tr><td>DQN plus the model's preference</td><td>0.3</td><td>Stayed alive and barely ate</td></tr>
-        <tr><td>Double DQN alone</td><td>16</td><td>A middling policy, then usually died</td></tr>
-        <tr><td>Step toward the apple</td><td>18</td><td>Simple, and usually fatal</td></tr>
-        <tr><td>Search</td><td>56</td><td>No deaths. 15 of 30 boards filled</td></tr>
+        <tr><td>Picture of the board</td><td>Score 0. Four turns right, into the wall</td></tr>
+        <tr><td>Coordinate matrix</td><td>Turned toward the apple and ate it</td></tr>
+        <tr><td>Body listed as cells</td><td>Clean opening, then score 2 at step 8</td></tr>
+        <tr><td>Path since the last apple, and what each move does</td><td>Score 9 in 135 steps, model alone</td></tr>
+        <tr><td>Network trained to follow the model's preference</td><td>Average 0.4, and 0.3 when added at decision time</td></tr>
+        <tr><td>Network on its own</td><td>Average 16</td></tr>
+        <tr><td>Step toward the apple when the next cell is safe</td><td>Average 18</td></tr>
+        <tr><td>Search, 30 boards, up to 2000 steps</td><td>Average 56. 15 boards filled</td></tr>
+        <tr><td>Network takes over when the path repeats</td><td>Scores 18, then 13, then 31</td></tr>
+        <tr><td>Model while the path is new; network only if a closer step still reaches the tail; search for the rest of that chase</td><td>Score 61 in 978 steps. Board filled</td></tr>
       </tbody>
     </table>
-
-    <h2>How the two are combined</h2>
-    <p>The model keeps the controls while its path is new and the move still leaves a way back to the tail. When the route repeats, or that way would close, the learned network may take the next step only if it is closer to the apple and the tail stays reachable. If it has no such step, search steers until the apple, and then the model resumes. A move into a wall or the body is still refused.</p>
-    <p>On the 8×8 board with seed 7, that game filled the board: score 61 after 978 steps. The model ate 23 apples, including the last two. The network ate 12. Search ate the other 26. The network on its own does not finish a long snake. Once getting closer would trap the tail, search is what carries the chase.</p>
-
-    <h2>Speed</h2>
-    <p>The model is the slow part. In that winning game it was called 209 times and those calls took 276 seconds, 1.3 seconds each, on a GTX 1650. The other 769 moves were the network or search. Timed on the same positions, on CPU, search took 53 microseconds a move and the network 121. One model decision is about 25,000 times slower than search. A model-only game ends sooner only because it dies: the text-only run lasted 135 steps, scored 9, and at this rate that is about three minutes.</p>
-    <p>The page used to skip. It reads the current board a few times a second, and a search move replaces that board in a fraction of a millisecond, so a burst of cells disappeared before one of them was painted. The model looked stepwise only because it thinks for more than a second. Each board now stays up for three quarters of a second. Watching this win one cell at a time takes about fourteen minutes.</p>
+    <p>In that last game the model ate 23 apples, including the last two. The network ate 12. Search ate 26. A model look took 1.3 seconds. On the same positions, search took 53 microseconds a move and the network 121. Press Start and that last row is what plays.</p>
   </article>
 
   <section class="play-block">
