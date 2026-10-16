@@ -25,7 +25,40 @@ class Decision:
         return float(self.probabilities.get(self.move.value, 0.0))
 
 
-def coordinate_state(game: SnakeGame) -> str:
+def _distance(ax: int, ay: int, bx: int, by: int) -> int:
+    return abs(ax - bx) + abs(ay - by)
+
+
+def move_text(game: SnakeGame, move: Direction, trail: list[tuple[int, int]] | None) -> str:
+    """What one option does, including whether it steps back onto the recent path."""
+    nx, ny = game.next_cell(move)
+    hx, hy = game.head
+    fx, fy = game.food
+    before = _distance(hx, hy, fx, fy)
+    after = _distance(nx, ny, fx, fy)
+    if after < before:
+        distance = f"closer to the apple, distance {before} becomes {after}"
+    elif after > before:
+        distance = f"farther from the apple, distance {before} becomes {after}"
+    else:
+        distance = f"the same distance from the apple, {before}"
+    if not (0 <= nx < game.size and 0 <= ny < game.size):
+        place = "outside the board, a wall"
+    elif game.would_die(move) == "self":
+        place = "the snake's body"
+    elif (nx, ny) == game.food:
+        place = "the apple"
+    else:
+        tail = game.snake[0]
+        seen = (nx, ny) in set(trail or []) and (nx, ny) != tail
+        if seen:
+            place = "empty, but the head already left this cell since the last apple"
+        else:
+            place = "empty, and not on the path since the last apple"
+    return f"{move.value} — column {nx}, row {ny}; {place}; {distance}"
+
+
+def coordinate_state(game: SnakeGame, trail: list[tuple[int, int]] | None = None) -> str:
     """The board as text. Column 0 is the left edge. Row 0 is the top edge."""
     head = game.head
     food = game.food
@@ -54,27 +87,35 @@ def coordinate_state(game: SnakeGame) -> str:
     fx, fy = food
     lines.append(f"Head: column {hx}, row {hy}. Facing {game.heading.value}.")
     lines.append(f"Apple: column {fx}, row {fy}.")
-    behind = [f"column {x}, row {y}" for x, y in reversed(game.snake[:-1])]
-    lines.append("Body behind the head, nearest first: " + ("; ".join(behind) if behind else "none") + ".")
+    lines.append("Snake body as coordinates, head first. Each pair is column, row:")
+    for index, (x, y) in enumerate(reversed(game.snake), start=1):
+        role = "head" if index == 1 else ("tail" if index == len(game.snake) else "body")
+        lines.append(f"{index}. {role}: column {x}, row {y}")
     lines.append(f"Score {game.score}. Length {game.length}. Step {game.steps}.")
-    lines.append("A 180-degree reversal is illegal. Do not enter a wall or a body cell.")
+    lines.append("Path of the head since the last apple, oldest first. Each pair is column, row:")
+    walked = list(trail or [])
+    if len(walked) <= 1:
+        lines.append("The head has not left a trail yet.")
+    else:
+        for index, (x, y) in enumerate(walked, start=1):
+            lines.append(f"{index}. column {x}, row {y}")
+    lines.append(
+        "A move onto that path repeats a cell the head already left. "
+        "Prefer an empty cell that is closer to the apple and is not on that path."
+    )
     return "\n".join(lines)
 
 
-def build_questions(game: SnakeGame) -> dict[str, Any]:
-    criteria = {}
-    for move in game.legal_moves():
-        nx, ny = game.next_cell(move)
-        criteria[move.value] = (
-            f"{move.value} — the head moves to column {nx} row {ny}"
-        )
+def build_questions(game: SnakeGame, trail: list[tuple[int, int]] | None = None) -> dict[str, Any]:
+    criteria = {move.value: move_text(game, move, trail) for move in game.legal_moves()}
     return {
         "move": {
             "type": "choice",
             "instructions": (
-                "Using only the coordinate matrix, "
-                "which move should the snake make now so it gets closer to the apple "
-                "without entering a wall or its own body? Choose exactly one option."
+                "Using the coordinates, the path since the last apple, and the result of each option, "
+                "choose the move that gets closer to the apple. "
+                "Do not enter a wall or the body. "
+                "Do not return to a cell already on that path when another empty cell is closer to the apple."
             ),
             "criteria": criteria,
         }
@@ -239,12 +280,15 @@ def load_model():
         raise
 
 
-def decide(game: SnakeGame) -> Decision:
+def decide(game: SnakeGame, trail: list[tuple[int, int]] | None = None) -> Decision:
     import time
 
     model = load_model()
     started = time.perf_counter()
-    result = model.system_one(state=coordinate_state(game), questions=build_questions(game))
+    result = model.system_one(
+        state=coordinate_state(game, trail),
+        questions=build_questions(game, trail),
+    )
     latency = time.perf_counter() - started
     answers = result.get("answers", result) if isinstance(result, dict) else {}
     move_answer = answers.get("move", answers) if isinstance(answers, dict) else answers

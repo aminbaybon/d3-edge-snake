@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from policy import relative_to_absolute
+from policy import _reaches_tail, plan_move, relative_to_absolute
 from snake import Direction, SnakeGame
 
 WEIGHTS = Path(__file__).resolve().parent / "rl_snake.pt"
@@ -154,6 +154,121 @@ def edit_model_move(
     if learned is not proposal and q_of[learned] > q_of[proposal] + OVERRIDE_MARGIN:
         return learned, f"The model said {proposal.value}. The learned network changed it to {learned.value}."
     return proposal, "Played the model's move."
+
+
+class LoopWatch:
+    """Hand the learned network the controls when the snake is circling.
+
+    The model keeps playing while the path is new. A repeated route, a head
+    returning to a cell it already left since the last apple, or a second
+    fatal proposal means the model is stuck. The network then steers until
+    the snake eats, and the model resumes.
+    """
+
+    def __init__(self) -> None:
+        self.heads: list[tuple[int, int]] = []
+        self.moves: list[str] = []
+        self.driving = False
+        self.planner = False
+        self.score = 0
+        self.fatal_proposals = 0
+
+    def looping(self, game: SnakeGame) -> bool:
+        if self.driving:
+            return True
+        if len(self.moves) >= 8:
+            here = game.head
+            prior = self.heads[:-1]
+            if here in prior[-16:]:
+                self.driving = True
+                return True
+        for period in range(2, 9):
+            if len(self.moves) >= period * 2 and self.moves[-period:] == self.moves[-2 * period : -period]:
+                self.driving = True
+                return True
+        return False
+
+    def note_fatal(self) -> None:
+        self.fatal_proposals += 1
+        if self.fatal_proposals >= 2:
+            self.driving = True
+
+    def record(self, game: SnakeGame, move: Direction) -> None:
+        self.heads.append(game.head)
+        self.moves.append(move.value)
+        if game.score != self.score:
+            self.score = game.score
+            self.heads.clear()
+            self.moves.clear()
+            self.driving = False
+            self.planner = False
+            self.fatal_proposals = 0
+
+
+def _keeps_tail(game: SnakeGame, move: Direction) -> bool:
+    if game.would_die(move):
+        return False
+    nxt = game.next_cell(move)
+    snake = list(game.snake)
+    followed = [*snake, nxt] if nxt == game.food else [*snake[1:], nxt]
+    return _reaches_tail(followed, game.size)
+
+
+def _food_distance(cell: tuple[int, int], food: tuple[int, int]) -> int:
+    return abs(cell[0] - food[0]) + abs(cell[1] - food[1])
+
+
+def rescue_move(net: QNet, game: SnakeGame, device: torch.device) -> tuple[Direction, dict[str, float], str]:
+    """Steer toward the apple without closing the path back to the tail.
+
+    The network may pick a step only when that step is closer to the apple and
+    the tail stays reachable. If no such step exists, the grid search takes
+    over. A one-step tail check is not enough to finish a long snake; the
+    search is what keeps that path open for the whole chase.
+    """
+    values = q_values(net, game, device)
+    here = _food_distance(game.head, game.food)
+    closer: list[tuple[float, Direction]] = []
+    for action in range(3):
+        direction = relative_to_absolute(game.heading, action)
+        if not _keeps_tail(game, direction):
+            continue
+        nxt = game.next_cell(direction)
+        distance = 0 if nxt == game.food else _food_distance(nxt, game.food)
+        if distance < here:
+            closer.append((float(values[action]), direction))
+    if closer:
+        closer.sort(key=lambda item: item[0], reverse=True)
+        chosen = closer[0][1]
+        weights = np.exp(np.array([item[0] for item in closer]) - closer[0][0])
+        weights /= weights.sum()
+        probs = {direction.value: 0.0 for direction in Direction}
+        for weight, (_, direction) in zip(weights, closer):
+            probs[direction.value] = float(weight)
+        return chosen, probs, "network"
+    move, probs = plan_move(game)
+    return move, probs, "search"
+
+
+def steer_move(net: QNet, game: SnakeGame, device: torch.device) -> tuple[Direction, dict[str, float]]:
+    """The learned move among steps that do not die immediately."""
+    values = q_values(net, game, device)
+    ranked: list[tuple[float, Direction]] = []
+    for action in range(3):
+        direction = relative_to_absolute(game.heading, action)
+        if game.would_die(direction):
+            continue
+        ranked.append((float(values[action]), direction))
+    if not ranked:
+        return dqn_move(net, game, device)
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    chosen = ranked[0][1]
+    weights = np.exp(np.array([item[0] for item in ranked]) - ranked[0][0])
+    weights /= weights.sum()
+    probs = {direction.value: 0.0 for direction in Direction}
+    for weight, (_, direction) in zip(weights, ranked):
+        probs[direction.value] = float(weight)
+    return chosen, probs
 
 
 def dqn_move(

@@ -1,42 +1,51 @@
 # Decision Snake
 
-This game gives the downloaded [d3-edge](https://huggingface.co/vllm-sr/d3-edge) model the board as a coordinate matrix, not as a picture. A small network, trained by reinforcement learning, edits that decision when the model would die or when another safe move is clearly better.
+I wanted to see if a small downloaded decision model could play snake, and if reinforcement learning could improve its decisions without retraining its weights.
 
-The clip shows the motion: one cell at a time, only up, down, left, or right, until the board is full or the snake dies. Press Start on the local page and the model is what proposes the move.
+![The winning game, every move, played back faster than the live page](assets/play.gif)
 
-![The snake moving one cell at a time](assets/play.gif)
+The clip is one real game: an 8×8 board, seed 7, played by the combination below. Every move is in the clip. It is sped up so it can sit on this page. On the local page each cell stays up long enough to follow, because the fast moves used to disappear before the browser painted them.
 
-## What we set out to do
+The model reads the board as text. It keeps control while its path is new. When the route repeats, or the next step would close the way back to the tail, a learned network may take a step that is closer to the apple. If the network has no such step, search finishes that chase and hands the board back. This game filled the board. Score 61, in 978 steps.
 
-The point is to see this model on a real control problem and improve its decision with reinforcement learning. d3-edge reads a text matrix of the cells and proposes a direction. The learned network then keeps that proposal, or replaces it.
+## What I tested
 
-## The model
+[d3-edge](https://huggingface.co/vllm-sr/d3-edge) is a decision model of about 0.8 billion parameters, built on Qwen3.5. The machine was a GTX 1650 with 4 GB. It has no bfloat16 CUDA kernels, so the weights load in float16 and occupy 1.11 GB. I did not fine-tune them. A training run of 200,000 looks, at more than a second each, would be days of inference, and the decision layer is a readout over labels.
 
-d3-edge is a decision model of about 0.8 billion parameters, built on Qwen3.5. It can answer from text alone, so each turn it receives a matrix: row 0 is the top, column 0 is the left, and every cell is empty, head, body, or apple. An earlier run sent a picture of the same 8×8 game, seed 7. The apple was above the head, and from the picture the model chose right four times into the wall. From the coordinate matrix, on that same opening, its own first choice was up (probability 0.52), the next choice was up again, and it ate the apple. After four moves the score was 1 and the snake was still alive. Left, which the picture run never offered, appeared in the later text decisions. A text decision takes about two seconds.
+I sent the same opening both ways. Seed 7, the apple above the head. From a picture of the board the model chose right four times and hit the wall. Score 0. From a coordinate matrix its own first choice was up, and the next choice ate the apple.
 
-The test GPU was a GTX 1650 with 4 GB. It has no bfloat16 CUDA kernels, so the weights were loaded in float16 and occupied 1.11 GB.
+Giving it the body as coordinates made the opening correct, then it died on step 8 with score 2. I added the path the head had walked since the last apple, and the result of each legal move: closer or farther, and whether the cell is empty, the apple, the body, a wall, or a cell already left. Alone, that text reached score 9 in 135 steps, and it died on its own body. The model can read the next cell. It does not search the future shape of a long snake.
 
-## Reinforcement learning
+I also tried to make the network copy the model. That made the network worse, which is why the live player does not copy. Shifting the training reward toward the model's recorded preference dropped the average score from about 16 to 0.4. Adding that preference on top of the network's score at decision time left the snake alive and it almost never ate, because the recorded model had given left turns almost no weight.
 
-At each step the snake has three legal moves: turn left, go straight, or turn right. Reversing is illegal. Double DQN fits that choice. It keeps every step and learns from it again.
+Trained on its own, Double DQN reached about 16, close to a plain rule that steps toward the apple when the next cell is safe (about 18). An earlier reward had punished eating, and an earlier input was the whole board as a flat list. Those runs stayed near a score of 2 or 3.
 
-Training the 0.8B weights themselves does not fit in 4 GB, and at three seconds per look a training run of 200,000 steps would be about 167 hours of inference before a learning update. The decision layer is a readout over labels. The weights stay frozen.
+A network that only refuses a fatal move keeps the snake alive in a circle. On the early text it was still at score 2 after 285 steps. Handing it control when the path repeats reached score 18, then it hit itself. The richer text plus that handoff scored 13 and died at step 133. Letting the network pick any move that still reached the tail got to score 31, and then it circled. I stopped that run at step 800. It was alive, and it was not going to the apple.
 
-We first tried to improve the network by making it copy the model. That failed, and the failure is why the live player does not copy. Shifting the training reward toward the model's recorded preference dropped the average score from about 16 to 0.4. Adding that same preference on top of the network's score at decision time left the snake alive and it almost never ate, because the recorded model had given left turns almost no weight.
+The player behind Start is the next version of that idea.
 
-Trained on its own, Double DQN reached an average score of about 16, close to a plain rule that steps toward the apple when the next cell is safe. The network learned once its inputs said whether each of the three moves dies and where the apple sits. An earlier reward had punished eating, and an earlier input was the whole board as a flat list. Those two runs stayed near a score of 2 or 3.
+- The model plays while the path is new and the move still leaves a way back to the tail.
+- A move into a wall or the body is refused.
+- When the route repeats, or the model's step would close that way, the network may move only if the step is closer to the apple and the tail stays reachable.
+- If the network has no such step, search steers until the next apple. Then the model resumes.
 
-## How the two are combined
+On seed 7 the model ate 23 apples, including the last two. The network ate 12. Search ate 26. The board filled.
 
-The player behind Start asks the downloaded model for a fresh proposal from the current coordinate matrix. The learned network then edits it.
+Search on its own, over 30 random 8×8 games and a cap of 2000 steps, averaged 56, filled 15 boards, and never died. It is in the menu as a comparison. The default calls it only for the chase the network cannot make.
 
-- If the model's move would hit a wall or the body, it is refused.
-- If another safe move is clearly more valuable, the network plays that instead.
-- Otherwise the model's move is the one that is played.
+## Speed
 
-On the recorded game the raw model said right and died. With the editor, that right turn is refused. The pads on the page still show what the model itself answered.
+The model is the slow piece, not the fast one.
 
-Search is in the menu as a comparison. On 30 random 8×8 games it scored 56 on average, filled 15 boards, and never died. It never calls the model. It is not the default.
+In the winning game the model was called 209 times: 186 moves it played, and 23 proposals that were replaced because they would have closed the path. Those calls took 276 seconds on the GPU, 1.3 seconds on average, from 0.8 to 2.0 seconds. The other 769 moves were the network or search.
+
+I timed those two on the same 978 positions, on CPU, so the measurement would not share the GPU with the model. Search took 53 microseconds per move, 52 milliseconds for the whole game. The network took 121 microseconds per move, 118 milliseconds for the whole game. One model decision is about 25,000 times slower than search and about 11,000 times slower than the network.
+
+A model-only game ends sooner only because it dies. At 1.3 seconds a decision, the 135-step game that scored 9 is about three minutes. The win spent four and a half minutes inside the model.
+
+The page was skipping for a mechanical reason. It asks for the current board about four times a second and draws that one board. Search and the network replace the board in a fraction of a millisecond, so a burst of moves was gone before a single cell was painted. The model looked stepwise because it thinks for more than a second. Each board now stays up for three quarters of a second, long enough to animate one cell. Watching this win one cell at a time takes about fourteen minutes: four and a half of those are the model thinking, and the rest is the page waiting on the fast moves.
+
+The averages below are the earlier trials that decided how to combine the two. The picture run is one recorded game. The rest are 30 boards.
 
 | Player | Average score | What happened |
 | --- | ---: | --- |
@@ -56,10 +65,10 @@ python -m venv .venv
 .\.venv\Scripts\python app.py
 ```
 
-Open [http://127.0.0.1:7860](http://127.0.0.1:7860). The selected policy is d3-edge plus Double DQN. The model takes a few seconds per move and needs `transformers==5.17.0`.
+Open [http://127.0.0.1:7860](http://127.0.0.1:7860). The selected policy is d3-edge plus Double DQN. A model move takes about 1.3 seconds. A network or search move is held on screen for three quarters of a second so the cell is actually drawn. `transformers==5.17.0` is required.
 
-One game from the terminal:
+One full game from the terminal, the same seed as the clip:
 
 ```powershell
-.\.venv\Scripts\python app.py --episode --policy guided --seed 7 --size 8 --max-steps 8
+.\.venv\Scripts\python app.py --episode --policy guided --seed 7 --size 8
 ```

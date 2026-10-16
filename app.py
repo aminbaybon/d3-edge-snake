@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlparse
 from agent import decide, format_raw, load_model
 from policy import greedy_move, plan_move
 from render import render_board
-from rl_agent import WEIGHTS, dqn_move, edit_model_move, load_qnet
+from rl_agent import WEIGHTS, LoopWatch, _keeps_tail, dqn_move, load_qnet, rescue_move
 from snake import Direction, SnakeGame
 
 DEATH = {
@@ -62,10 +62,46 @@ def ensure_dqn():
     return _DQN
 
 
-def choose_move(game: SnakeGame, policy: str, use_image: bool) -> tuple[Direction, dict[str, float], float, str]:
+def choose_move(
+    game: SnakeGame,
+    policy: str,
+    use_image: bool,
+    watch: LoopWatch | None = None,
+) -> tuple[Direction, dict[str, float], float, str]:
     started = time.perf_counter()
     if policy in ("d3", "guided"):
-        decision = decide(game)
+        if policy == "guided" and watch is not None and watch.planner:
+            move, probs = plan_move(game)
+            return (
+                move,
+                probs,
+                time.perf_counter() - started,
+                "The path back to the tail was closing. Search is steering until the next apple.",
+            )
+        if policy == "guided" and watch is not None and watch.looping(game):
+            try:
+                net, board, device = ensure_dqn()
+            except FileNotFoundError:
+                decision = decide(game, list(watch.heads) if watch is not None else None)
+                return decision.move, decision.probabilities, decision.latency_s, "DQN weights are missing; the model's move was played."
+            if game.size != board:
+                decision = decide(game, list(watch.heads) if watch is not None else None)
+                return (
+                    decision.move,
+                    decision.probabilities,
+                    decision.latency_s,
+                    f"DQN was trained for a {board} board; the model's move was played.",
+                )
+            move, probs, who = rescue_move(net, game, device)
+            if who == "search":
+                watch.planner = True
+            note = (
+                "Loop. The learned network is steering until the next apple."
+                if who == "network"
+                else "The path back to the tail was closing. Search is steering until the next apple."
+            )
+            return move, probs, time.perf_counter() - started, note
+        decision = decide(game, list(watch.heads) if watch is not None else None)
         if policy == "d3":
             return decision.move, decision.probabilities, decision.latency_s, format_raw(decision)
         try:
@@ -79,8 +115,18 @@ def choose_move(game: SnakeGame, policy: str, use_image: bool) -> tuple[Directio
                 decision.latency_s,
                 f"DQN was trained for a {board} board; the model's move was played.",
             )
-        move, note = edit_model_move(net, game, device, decision.probabilities)
-        return move, decision.probabilities, decision.latency_s, note
+        if _keeps_tail(game, decision.move):
+            return decision.move, decision.probabilities, decision.latency_s, "Played the model's move."
+        if watch is not None:
+            watch.driving = True
+        move, probs, who = rescue_move(net, game, device)
+        if who == "search" and watch is not None:
+            watch.planner = True
+        if who == "network":
+            note = f"The model said {decision.move.value}, which would close the path. The learned network is steering until the next apple."
+        else:
+            note = f"The model said {decision.move.value}, which would close the path. Search is steering until the next apple."
+        return move, probs, decision.latency_s, note
     if policy == "greedy":
         move = greedy_move(game)
         probs = _certain(move)
@@ -158,6 +204,12 @@ def run_episode(seed: int, size: int, max_steps: int, use_image: bool, policy: s
             FRAME = encode_png(game)
             STATE["stats"] = snapshot(game)
             STATE["board"] = board_payload(game)
+        # The page polls about four times a second and only draws the latest
+        # board. Search and the network finish a move in a fraction of a
+        # millisecond, so a burst of those moves used to replace the board
+        # before the browser painted one of them. Hold each board long enough
+        # to be drawn. A model decision already takes longer than this.
+        visible_until = time.perf_counter() + 0.75
         if policy in ("d3", "guided"):
             load_model()
             with LOCK:
@@ -165,10 +217,16 @@ def run_episode(seed: int, size: int, max_steps: int, use_image: bool, policy: s
         history = []
         last_move = ""
         last_p = None
+        watch = LoopWatch()
         while game.alive and not STOP.is_set() and (max_steps <= 0 or game.steps < max_steps):
+            remain = visible_until - time.perf_counter()
+            if remain > 0 and STOP.wait(remain):
+                break
             greedy = game.greedy_hint().value
-            move, probs, latency, note = choose_move(game, policy, use_image)
+            move, probs, latency, note = choose_move(game, policy, use_image, watch)
             applied = game.step(move)
+            if policy in ("d3", "guided"):
+                watch.record(game, applied)
             last_move, last_p = applied.value, float(probs.get(applied.value, 0.0))
             png = encode_png(game, last_move=last_move, last_p=last_p)
             line = (
@@ -212,8 +270,7 @@ def run_episode(seed: int, size: int, max_steps: int, use_image: bool, policy: s
                         "board": board_payload(game),
                     }
                 )
-            if policy not in ("d3", "guided"):
-                time.sleep(0.68)
+            visible_until = time.perf_counter() + 0.75
         if STOP.is_set() and game.alive:
             ending = "stopped"
         elif game.alive and max_steps > 0:
