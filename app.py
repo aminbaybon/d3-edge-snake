@@ -65,8 +65,7 @@ def ensure_dqn():
 def choose_move(game: SnakeGame, policy: str, use_image: bool) -> tuple[Direction, dict[str, float], float, str]:
     started = time.perf_counter()
     if policy in ("d3", "guided"):
-        image = render_board(game) if use_image else None
-        decision = decide(game, image)
+        decision = decide(game)
         if policy == "d3":
             return decision.move, decision.probabilities, decision.latency_s, format_raw(decision)
         try:
@@ -230,7 +229,7 @@ def run_episode(seed: int, size: int, max_steps: int, use_image: bool, policy: s
             "alive": game.alive,
             "death": game.death,
             "death_fa": ending,
-            "used_image": use_image and policy in ("d3", "guided"),
+            "used_image": False,
             "policy": policy,
             "history": history,
         }

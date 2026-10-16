@@ -4,8 +4,6 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from PIL import Image
-
 from snake import Direction, SnakeGame, parse_direction
 
 MODEL_ID = "vllm-sr/d3-edge"
@@ -27,29 +25,40 @@ class Decision:
         return float(self.probabilities.get(self.move.value, 0.0))
 
 
-def build_state(game: SnakeGame) -> dict[str, Any]:
-    hx, hy = game.head
-    fx, fy = game.food
-    _, _, rel = game.relative_food()
-    return {
-        "game": "Snake",
-        "goal": "Eat the apple. Do not hit a wall or the snake's body. A 180-degree reversal is illegal.",
-        "board_size": game.size,
-        "coordinates": "Column 0 is the left edge and increases to the right. Row 0 is the top edge and increases downward.",
-        "head": {"column": hx, "row": hy},
-        "body": [{"column": x, "row": y} for x, y in game.snake],
-        "apple": {"column": fx, "row": fy},
-        "heading_label": game.heading.value,
-        "heading": game.heading.value,
-        "apple_relative_to_head": rel,
-        "score": game.score,
-        "length": game.length,
-        "step": game.steps,
-        "legal_move_labels": [d.value for d in game.legal_moves()],
-        "legal_moves": [d.value for d in game.legal_moves()],
-        "ascii_board": game.ascii_board(),
-        "image_reminder": "In the image the head is yellow, the body is green, the apple is red, and the labels are English.",
-    }
+def coordinate_state(game: SnakeGame) -> str:
+    """The board as text. Column 0 is the left edge. Row 0 is the top edge."""
+    head = game.head
+    food = game.food
+    body = set(game.snake)
+    columns = " ".join(f"{x:>2}" for x in range(game.size))
+    lines = [
+        "Snake. Decide from these coordinates. There is no picture.",
+        "Column 0 is the left edge and increases to the right. Row 0 is the top edge and increases downward.",
+        "Matrix codes: . empty, H head, B body, A apple.",
+        f"columns: {columns}",
+    ]
+    for y in range(game.size):
+        cells = []
+        for x in range(game.size):
+            pos = (x, y)
+            if pos == head:
+                cells.append(" H")
+            elif pos == food:
+                cells.append(" A")
+            elif pos in body:
+                cells.append(" B")
+            else:
+                cells.append(" .")
+        lines.append(f"row {y}:{''.join(cells)}")
+    hx, hy = head
+    fx, fy = food
+    lines.append(f"Head: column {hx}, row {hy}. Facing {game.heading.value}.")
+    lines.append(f"Apple: column {fx}, row {fy}.")
+    behind = [f"column {x}, row {y}" for x, y in reversed(game.snake[:-1])]
+    lines.append("Body behind the head, nearest first: " + ("; ".join(behind) if behind else "none") + ".")
+    lines.append(f"Score {game.score}. Length {game.length}. Step {game.steps}.")
+    lines.append("A 180-degree reversal is illegal. Do not enter a wall or a body cell.")
+    return "\n".join(lines)
 
 
 def build_questions(game: SnakeGame) -> dict[str, Any]:
@@ -63,9 +72,9 @@ def build_questions(game: SnakeGame) -> dict[str, Any]:
         "move": {
             "type": "choice",
             "instructions": (
-                "Looking at the board image and the JSON state, "
+                "Using only the coordinate matrix, "
                 "which move should the snake make now so it gets closer to the apple "
-                "without hitting a wall or its own body? Choose exactly one option."
+                "without entering a wall or its own body? Choose exactly one option."
             ),
             "criteria": criteria,
         }
@@ -230,17 +239,12 @@ def load_model():
         raise
 
 
-def decide(game: SnakeGame, board_image: Image.Image | None) -> Decision:
+def decide(game: SnakeGame) -> Decision:
     import time
 
     model = load_model()
-    state = build_state(game)
-    questions = build_questions(game)
-    kwargs: dict[str, Any] = {"state": state, "questions": questions}
-    if board_image is not None:
-        kwargs["images"] = [board_image.convert("RGB")]
     started = time.perf_counter()
-    result = model.system_one(**kwargs)
+    result = model.system_one(state=coordinate_state(game), questions=build_questions(game))
     latency = time.perf_counter() - started
     answers = result.get("answers", result) if isinstance(result, dict) else {}
     move_answer = answers.get("move", answers) if isinstance(answers, dict) else answers
@@ -252,7 +256,7 @@ def decide(game: SnakeGame, board_image: Image.Image | None) -> Decision:
         probabilities=probs,
         raw=result if isinstance(result, dict) else {"result": result},
         latency_s=latency,
-        used_image=board_image is not None,
+        used_image=False,
     )
 
 

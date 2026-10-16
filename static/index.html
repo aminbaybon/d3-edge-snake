@@ -95,15 +95,15 @@
 <main>
   <article class="report">
     <h1>Decision Snake</h1>
-    <p class="sub">A snake game that uses the downloaded d3-edge model on every move. A small network, trained by playing, edits that decision when the model would die or when another safe move is clearly better. The clip shows the motion: one cell at a time, only up, down, left, or right.</p>
+    <p class="sub">A snake game that gives the downloaded d3-edge model the board as a coordinate matrix, not as a picture. A small network, trained by playing, edits that decision when the model would die or when another safe move is clearly better.</p>
     <img class="play" src="/play.gif" alt="Search playing snake, one cell at a time">
 
     <h2>What we set out to do</h2>
-    <p>The point of this page is the downloaded model. Each turn d3-edge looks at the picture of the board and proposes a direction. Reinforcement learning then improves that proposal. Press Start and that is what plays. Search is still in the menu, as a comparison.</p>
+    <p>The point of this page is the downloaded model. Each turn d3-edge reads a text matrix of the cells — head, body, and apple, with column and row — and proposes a direction. Reinforcement learning then improves that proposal. Press Start and that is what plays. Search is still in the menu, as a comparison.</p>
 
     <h2>The model</h2>
-    <p><a href="https://huggingface.co/vllm-sr/d3-edge">d3-edge</a> is a decision model of about 0.8 billion parameters, built on Qwen3.5. Each turn we drew the board as a picture and asked it which way to go. On the recorded game, an 8×8 board with seed 7, the apple was above the head. The useful move was up. The model chose right four times and hit the wall on step 4, with a score of 0. Each look took about three seconds, and it grew more confident in "right" as the wall got closer. Left was absent from every decision.</p>
-    <p>The picture was a poor input. The game already stores every cell. The image is only a drawing of those positions, so the model had to reconstruct a state the program already held. On the GTX 1650 used for the test, the weights were loaded in float16 and occupied 1.11 GB.</p>
+    <p><a href="https://huggingface.co/vllm-sr/d3-edge">d3-edge</a> is a decision model of about 0.8 billion parameters, built on Qwen3.5. It accepts text on its own, so the board is a matrix: row 0 is the top, column 0 is the left, and each cell is empty, head, body, or apple. On the GTX 1650 the weights load in float16 and occupy 1.11 GB. A text decision takes about two seconds.</p>
+    <p>The same opening, an 8×8 board with seed 7, was tried both ways. From the picture the model chose right four times and hit the wall. From the coordinate matrix its own first choice was up, toward the apple, and the next choice ate it. After four moves the score was 1 and the snake was alive.</p>
 
     <h2>Reinforcement learning</h2>
     <p>At each step the snake has three legal moves: turn left, go straight, or turn right. Reversing is illegal. For that kind of choice, Double DQN fits. It keeps every step and learns from it again. Training the 0.8B model itself was out of reach on a 4 GB GPU: one decision took about three seconds, the training activations do not fit, and the decision layer is a readout over labels. The model stayed frozen.</p>

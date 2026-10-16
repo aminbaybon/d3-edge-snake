@@ -1,6 +1,6 @@
 # Decision Snake
 
-This game uses the downloaded [d3-edge](https://huggingface.co/vllm-sr/d3-edge) model on every move. A small network, trained by reinforcement learning, edits that decision when the model would die or when another safe move is clearly better.
+This game gives the downloaded [d3-edge](https://huggingface.co/vllm-sr/d3-edge) model the board as a coordinate matrix, not as a picture. A small network, trained by reinforcement learning, edits that decision when the model would die or when another safe move is clearly better.
 
 The clip shows the motion: one cell at a time, only up, down, left, or right, until the board is full or the snake dies. Press Start on the local page and the model is what proposes the move.
 
@@ -8,11 +8,11 @@ The clip shows the motion: one cell at a time, only up, down, left, or right, un
 
 ## What we set out to do
 
-The point is to see this model on a real control problem and improve its decision with reinforcement learning. d3-edge looks at a picture of the board and proposes a direction. The learned network then keeps that proposal, or replaces it.
+The point is to see this model on a real control problem and improve its decision with reinforcement learning. d3-edge reads a text matrix of the cells and proposes a direction. The learned network then keeps that proposal, or replaces it.
 
 ## The model
 
-d3-edge is a decision model of about 0.8 billion parameters, built on Qwen3.5. On the game we recorded, an 8×8 board with seed 7, the apple was above the head. The useful move was up. The model alone chose right four times and hit the wall on step 4. The score was 0. Each look took about three seconds, and its confidence in "right" rose as the wall got closer. Left was absent from every decision.
+d3-edge is a decision model of about 0.8 billion parameters, built on Qwen3.5. It can answer from text alone, so each turn it receives a matrix: row 0 is the top, column 0 is the left, and every cell is empty, head, body, or apple. An earlier run sent a picture of the same 8×8 game, seed 7. The apple was above the head, and from the picture the model chose right four times into the wall. From the coordinate matrix, on that same opening, its own first choice was up (probability 0.52), the next choice was up again, and it ate the apple. After four moves the score was 1 and the snake was still alive. Left, which the picture run never offered, appeared in the later text decisions. A text decision takes about two seconds.
 
 The test GPU was a GTX 1650 with 4 GB. It has no bfloat16 CUDA kernels, so the weights were loaded in float16 and occupied 1.11 GB.
 
@@ -28,7 +28,7 @@ Trained on its own, Double DQN reached an average score of about 16, close to a 
 
 ## How the two are combined
 
-The player behind Start asks the downloaded model for a fresh proposal on the current picture. The learned network then edits it.
+The player behind Start asks the downloaded model for a fresh proposal from the current coordinate matrix. The learned network then edits it.
 
 - If the model's move would hit a wall or the body, it is refused.
 - If another safe move is clearly more valuable, the network plays that instead.
