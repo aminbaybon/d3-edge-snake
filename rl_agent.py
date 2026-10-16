@@ -114,6 +114,48 @@ def q_values(net: QNet, game: SnakeGame, device: torch.device) -> np.ndarray:
         return net(obs).squeeze(0).detach().cpu().numpy()
 
 
+# The learned value must beat the model's safe proposal by this much before
+# the network replaces it. A smaller gap keeps the downloaded model's move.
+OVERRIDE_MARGIN = 0.5
+
+
+def edit_model_move(
+    net: QNet,
+    game: SnakeGame,
+    device: torch.device,
+    model_probs: dict[str, float],
+) -> tuple[Direction, str]:
+    """Keep the model's proposal, and replace it when play has shown it is worse.
+
+    The 0.8B weights stay frozen. This network was trained by playing, and it
+    only edits the live decision: a move that dies is refused, and a safe move
+    is replaced when another safe move is clearly more valuable.
+    """
+    ranked = sorted(model_probs.items(), key=lambda item: item[1], reverse=True)
+    model_name = ranked[0][0] if ranked else ""
+    model_move = Direction(model_name) if model_name in {item.value for item in Direction} else None
+    safe = [direction for direction in game.legal_moves() if not game.would_die(direction)]
+    pool = safe or list(game.legal_moves())
+    values = q_values(net, game, device)
+    q_of = {
+        relative_to_absolute(game.heading, action): float(values[action])
+        for action in range(3)
+    }
+    learned = max(pool, key=lambda direction: q_of[direction])
+    mentioned = [direction for direction in pool if model_probs.get(direction.value, 0.0) > 0.0]
+    proposal = max(mentioned, key=lambda direction: model_probs[direction.value]) if mentioned else None
+    fatal = model_move is not None and bool(game.would_die(model_move))
+
+    if proposal is None:
+        return learned, "The model named no safe move, so the learned network chose."
+    if fatal:
+        chosen = learned if q_of[learned] > q_of[proposal] + OVERRIDE_MARGIN else proposal
+        return chosen, f"The model said {model_move.value}, which would die. Played {chosen.value} instead."
+    if learned is not proposal and q_of[learned] > q_of[proposal] + OVERRIDE_MARGIN:
+        return learned, f"The model said {proposal.value}. The learned network changed it to {learned.value}."
+    return proposal, "Played the model's move."
+
+
 def dqn_move(
     net: QNet,
     game: SnakeGame,

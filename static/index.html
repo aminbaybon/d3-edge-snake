@@ -95,11 +95,11 @@
 <main>
   <article class="report">
     <h1>Decision Snake</h1>
-    <p class="sub">A snake game, and the record of how we chose the player that runs it. The clip is that player: one cell at a time, only up, down, left, or right, until the board is full or the snake dies.</p>
+    <p class="sub">A snake game that uses the downloaded d3-edge model on every move. A small network, trained by playing, edits that decision when the model would die or when another safe move is clearly better. The clip shows the motion: one cell at a time, only up, down, left, or right.</p>
     <img class="play" src="/play.gif" alt="Search playing snake, one cell at a time">
 
     <h2>What we set out to do</h2>
-    <p>The snake was playing badly. We wanted the best move it could make. The plan was to show the rendered board to a vision model, then combine that model with reinforcement learning so the snake would improve. The clip above is what remained after that plan was tested. The model is still available in the menu. It is no longer the player.</p>
+    <p>The point of this page is the downloaded model. Each turn d3-edge looks at the picture of the board and proposes a direction. Reinforcement learning then improves that proposal. Press Start and that is what plays. Search is still in the menu, as a comparison.</p>
 
     <h2>The model</h2>
     <p><a href="https://huggingface.co/vllm-sr/d3-edge">d3-edge</a> is a decision model of about 0.8 billion parameters, built on Qwen3.5. Each turn we drew the board as a picture and asked it which way to go. On the recorded game, an 8×8 board with seed 7, the apple was above the head. The useful move was up. The model chose right four times and hit the wall on step 4, with a score of 0. Each look took about three seconds, and it grew more confident in "right" as the wall got closer. Left was absent from every decision.</p>
@@ -110,9 +110,8 @@
     <p>We used its recorded preferences as a teacher in two ways. During training, the reward was shifted toward the direction the model preferred. At decision time, that preference was added to the network's own score. Both versions played worse. The rewarded network averaged 0.4 and died immediately. The decision-time mix stayed alive and almost never ate, because the recorded model had given left turns almost no weight.</p>
     <p>Double DQN on its own reached an average score of about 16, close to a plain rule that steps toward the apple when the next cell is safe (about 18). Two earlier runs never got there. One reward punished eating, because the next apple is usually farther away. Another showed the network the whole board as a flat list, which does not say whether the next move dies. With a few facts about the three legal moves, the same network reached a score of about 15. The learning method had been fine. The reward and the inputs had been wrong.</p>
 
-    <h2>The player in the clip</h2>
-    <p>The default player searches the grid. It takes the shortest path to the apple only when the snake can follow that path and still reach its own tail after eating. That tail check is what keeps it out of a dead end. When the path fails the check, it follows a fixed loop around the board, again only when the tail stays reachable. Otherwise it moves toward its tail, and the last resort is the step that leaves the most open space.</p>
-    <p>On 30 random 8×8 games, allowed up to 2000 steps, search scored 56 on average. The best possible score is 61. Fifteen games filled the board. None died. The live game below has no step limit.</p>
+    <h2>What we measured</h2>
+    <p>These numbers are from the trials that decided how to combine the two. Forcing the network to imitate the model lowered its score from about 16 to about 0. Search, which never calls the model, scored 56 and filled 15 of 30 boards. It remains in the menu. It is not the player behind Start.</p>
     <table>
       <thead><tr><th>Player</th><th>Average</th><th>What happened</th></tr></thead>
       <tbody>
@@ -125,8 +124,8 @@
       </tbody>
     </table>
 
-    <h2>Where that leaves the model</h2>
-    <p>The model was unnecessary for this game. The board is already known exactly. Passing a drawing of it through the 0.8B model produced a slow and confident mistake, and teaching a smaller network to follow that mistake lowered the score from about 16 to about 0. The snake in the clip is the search described above. Press Start and that is the policy that plays.</p>
+    <h2>How the two are combined</h2>
+    <p>Copying the model made the network worse, so that is not what runs. The 0.8B weights stay frozen: training them does not fit in 4 GB, and one look already takes about three seconds. The learned network plays the game on its own during training. At decision time it reads the model's live proposal and keeps it when the move is safe and reasonable. It replaces the proposal when that move would hit a wall or the body, or when another safe move is clearly more valuable. On the recorded game the raw model said right and died. With the editor, that right turn is refused.</p>
   </article>
 
   <section class="play-block">
@@ -135,10 +134,11 @@
   <div class="controls">
     <label>Policy
       <select id="policy">
-        <option value="plan" selected>Search — best</option>
-        <option value="dqn">Double DQN</option>
+        <option value="guided" selected>d3-edge + Double DQN</option>
+        <option value="d3">d3-edge alone</option>
+        <option value="dqn">Double DQN alone</option>
+        <option value="plan">Search</option>
         <option value="greedy">Greedy</option>
-        <option value="d3">d3-edge (slow)</option>
       </select>
     </label>
     <label>Seed<input id="seed" type="number" value="7"></label>

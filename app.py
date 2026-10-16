@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlparse
 from agent import decide, format_raw, load_model
 from policy import greedy_move, plan_move
 from render import render_board
-from rl_agent import WEIGHTS, dqn_move, load_qnet
+from rl_agent import WEIGHTS, dqn_move, edit_model_move, load_qnet
 from snake import Direction, SnakeGame
 
 DEATH = {
@@ -40,8 +40,9 @@ STATE: dict = {
 }
 FRAME: bytes = b""
 STOP = threading.Event()
-POLICIES = ("plan", "dqn", "d3", "greedy")
+POLICIES = ("guided", "d3", "dqn", "plan", "greedy")
 POLICY_LABEL = {
+    "guided": "d3-edge + DQN",
     "plan": "Search",
     "dqn": "Double DQN",
     "d3": "d3-edge",
@@ -63,10 +64,24 @@ def ensure_dqn():
 
 def choose_move(game: SnakeGame, policy: str, use_image: bool) -> tuple[Direction, dict[str, float], float, str]:
     started = time.perf_counter()
-    if policy == "d3":
+    if policy in ("d3", "guided"):
         image = render_board(game) if use_image else None
         decision = decide(game, image)
-        return decision.move, decision.probabilities, decision.latency_s, format_raw(decision)
+        if policy == "d3":
+            return decision.move, decision.probabilities, decision.latency_s, format_raw(decision)
+        try:
+            net, board, device = ensure_dqn()
+        except FileNotFoundError:
+            return decision.move, decision.probabilities, decision.latency_s, "DQN weights are missing; the model's move was played."
+        if game.size != board:
+            return (
+                decision.move,
+                decision.probabilities,
+                decision.latency_s,
+                f"DQN was trained for a {board} board; the model's move was played.",
+            )
+        move, note = edit_model_move(net, game, device, decision.probabilities)
+        return move, decision.probabilities, decision.latency_s, note
     if policy == "greedy":
         move = greedy_move(game)
         probs = _certain(move)
@@ -125,11 +140,11 @@ def snapshot(game: SnakeGame) -> dict:
     }
 
 
-def run_episode(seed: int, size: int, max_steps: int, use_image: bool, policy: str = "plan") -> None:
+def run_episode(seed: int, size: int, max_steps: int, use_image: bool, policy: str = "guided") -> None:
     global FRAME
     try:
         if policy not in POLICIES:
-            policy = "plan"
+            policy = "guided"
         with LOCK:
             STATE.update({
                 "status": f"Starting with {POLICY_LABEL[policy]}…",
@@ -144,7 +159,7 @@ def run_episode(seed: int, size: int, max_steps: int, use_image: bool, policy: s
             FRAME = encode_png(game)
             STATE["stats"] = snapshot(game)
             STATE["board"] = board_payload(game)
-        if policy == "d3":
+        if policy in ("d3", "guided"):
             load_model()
             with LOCK:
                 STATE["status"] = "Model ready. The game is starting."
@@ -198,7 +213,7 @@ def run_episode(seed: int, size: int, max_steps: int, use_image: bool, policy: s
                         "board": board_payload(game),
                     }
                 )
-            if policy != "d3":
+            if policy not in ("d3", "guided"):
                 time.sleep(0.68)
         if STOP.is_set() and game.alive:
             ending = "stopped"
@@ -215,7 +230,7 @@ def run_episode(seed: int, size: int, max_steps: int, use_image: bool, policy: s
             "alive": game.alive,
             "death": game.death,
             "death_fa": ending,
-            "used_image": use_image and policy == "d3",
+            "used_image": use_image and policy in ("d3", "guided"),
             "policy": policy,
             "history": history,
         }
@@ -272,7 +287,7 @@ class Handler(BaseHTTPRequestHandler):
                     "latency": STATE["latency"],
                     "board": STATE["board"],
                     "stats": STATE["stats"],
-                    "policy": STATE.get("policy", "plan"),
+                    "policy": STATE.get("policy", "guided"),
                     "summary": None
                     if STATE["summary"] is None
                     else {k: v for k, v in STATE["summary"].items() if k != "history"},
@@ -285,13 +300,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, b'{"ok":false}', "application/json")
                 return
             STOP.clear()
-            requested = q.get("policy", ["plan"])[0]
+            requested = q.get("policy", ["guided"])[0]
             args = (
                 int(q.get("seed", ["7"])[0]),
                 int(q.get("size", ["8"])[0]),
                 0,
                 q.get("image", ["1"])[0] != "0",
-                requested if requested in POLICIES else "plan",
+                requested if requested in POLICIES else "guided",
             )
             threading.Thread(target=run_episode, args=args, daemon=True).start()
             self._send(200, b'{"ok":true}', "application/json")
@@ -324,7 +339,7 @@ def main() -> None:
     parser.add_argument("--size", type=int, default=8)
     parser.add_argument("--max-steps", type=int, default=0, help="0 plays until the board is full or the snake dies")
     parser.add_argument("--no-image", action="store_true")
-    parser.add_argument("--policy", choices=POLICIES, default="plan")
+    parser.add_argument("--policy", choices=POLICIES, default="guided")
     parser.add_argument("--port", type=int, default=7860)
     args = parser.parse_args()
     game = SnakeGame(size=args.size, seed=args.seed)
