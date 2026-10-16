@@ -43,10 +43,10 @@
     select { width: auto; }
     button {
       background: var(--accent); color: #12081f; border: 0; border-radius: 12px;
-      padding: 10px 16px; font-weight: 800; cursor: pointer;
+      padding: 10px 16px; font-weight: 800;
     }
     button.ghost { background: #223049; color: var(--ink); }
-    button:disabled { opacity: .5; cursor: wait; }
+    button:disabled { opacity: .5; }
     .layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; }
     .stage-wrap {
       background: #0a1511;
@@ -76,13 +76,73 @@
     .pad .p { display: block; font-size: 18px; font-weight: 800; }
     .log { max-height: 180px; overflow: auto; line-height: 1.8; color: #d5def0; font-size: 13px; }
     #status { color: var(--muted); min-height: 1.6em; }
+    .report { max-width: 820px; }
+    .report img.play {
+      width: min(420px, 100%); height: auto; border-radius: 18px;
+      border: 8px solid #1b2a24; background: #07140f; margin: 8px 0 18px;
+    }
+    .report h2 { margin: 28px 0 8px; font-size: 20px; }
+    .report h3 { margin: 18px 0 6px; font-size: 16px; }
+    .report p, .report li { color: #d5deea; line-height: 1.7; }
+    .report table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 12px 0 18px; }
+    .report th, .report td { border-bottom: 1px solid #243247; text-align: left; padding: 6px 8px; }
+    .report th { color: var(--muted); font-weight: 700; }
+    .play-block { margin-top: 36px; }
     @media (max-width: 860px) { .layout { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
 <main>
-  <h1>Decision Snake</h1>
-  <p class="sub">The picture is only a display. The snake moves one cell at a time, horizontally or vertically, until the board is full or it dies. Search follows a safe path to the apple. d3-edge, on the recorded seed, walks into the wall.</p>
+  <article class="report">
+    <h1>Decision Snake</h1>
+    <p class="sub">Search plays the grid. The 0.8B vision model was measured, including as a teacher for Double DQN, and it made play worse.</p>
+    <img class="play" src="/play.gif" alt="Search playing snake, one cell at a time">
+
+    <h2>Result</h2>
+    <p>The vision model was not needed. Using its action distribution as a teacher made Double DQN worse. The rendered frame is a deterministic function of the grid. The action space is three relative moves: turn left, go straight, turn right. A 180-degree reversal is already illegal. On an 8×8 board the best decision procedure is search over that grid, not a 0.8B model looking at pixels.</p>
+    <p>On seed 7, size 8, d3-edge chose right four times and hit the wall on step 4. Score 0. Each decision took about 3.0–3.2 seconds. The same seed with search, under the 400-step cap the page used at the time, scored 39 and was still alive. The page no longer has a step cap. Search plays until the board is full or the snake dies. The animation above is that search.</p>
+
+    <h2>The model</h2>
+    <p><a href="https://huggingface.co/vllm-sr/d3-edge">d3-edge</a> is a decision readout on Qwen3.5-0.8B, about 594 million parameters, with BF16 weights. The test GPU was a GTX 1650, 4 GB, compute capability 7.5, which has no BF16 CUDA kernels, so the backbone was loaded in float16 and used 1.11 GiB. The fast attention kernels were not installed, so each decision took about three seconds.</p>
+    <p>All four recorded decisions had the head facing right and the apple above the head. The greedy hint was up every time. The model chose right, and that probability rose as the wall got closer. Left never appeared. This is one timed episode, not a 30-seed average. It was enough to build the teacher below: when the food was above the head, the model walked into the right wall.</p>
+    <table>
+      <thead><tr><th>Step</th><th>up</th><th>down</th><th>right</th><th>left</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>0.287</td><td>0.227</td><td>0.486</td><td>absent</td></tr>
+        <tr><td>2</td><td>0.314</td><td>0.260</td><td>0.426</td><td>absent</td></tr>
+        <tr><td>3</td><td>0.274</td><td>0.180</td><td>0.546</td><td>absent</td></tr>
+        <tr><td>4</td><td>0.274</td><td>0.169</td><td>0.557</td><td>absent</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Reinforcement learning</h2>
+    <p>The suitable algorithm for this game is Double DQN. Fine-tuning the 0.8B model is not. The action set is small and discrete, so DQN reuses each transition, while PPO and GRPO discard it after one update. SAC is for continuous actions. At three seconds per decision, 200,000 steps would be about 167 hours of inference before any backward pass, and the training activations do not fit in 4 GB. The decision head is a readout over labels, not a differentiable policy.</p>
+    <p>The model stayed frozen. Only the recorded distribution was used as a teacher. Left had no mass, so it was floored at <code>1e-6</code> and the distribution was renormalized. The log of that floor is about −13.8. Two combinations were run for 200,000 steps: a reward bonus of <code>0.5 * log π(direction)</code> with epsilon-greedy action selection, and a decision-time mixture <code>argmax (Q + 1.0 * log π)</code> on the DQN that had not seen the teacher.</p>
+    <p>Two earlier training runs were discarded. A Manhattan potential applied on the step that eats the apple punishes eating, because the next apple is usually farther away, and scores stayed near 3. The corrected reward on a flattened 192-dimensional grid still stayed near 2. The network that learned used 13 action-aligned features: three danger bits, a heading one-hot, food-sign bits, the apple in the heading frame, and length over area. That same MLP reached a score of about 15 by step 25,000.</p>
+
+    <h2>Numbers</h2>
+    <p>Board 8×8. The maximum score is 61. Unless noted, 30 seeds and a 250-step cap. d3-edge is the single recorded seed.</p>
+    <table>
+      <thead><tr><th>Policy</th><th>Mean</th><th>Median</th><th>Max</th><th>Deaths</th></tr></thead>
+      <tbody>
+        <tr><td>d3-edge (seed 7)</td><td>0</td><td>0</td><td>0</td><td>1</td></tr>
+        <tr><td>DQN trained with the d3 reward</td><td>0.40</td><td>0</td><td>2</td><td>1.00</td></tr>
+        <tr><td>DQN plus the d3 prior at decision time</td><td>0.30</td><td>0</td><td>1</td><td>0</td></tr>
+        <tr><td>Double DQN alone</td><td>15.93</td><td>16.5</td><td>21</td><td>0.97</td></tr>
+        <tr><td>Greedy</td><td>18.27</td><td>18</td><td>30</td><td>1.00</td></tr>
+        <tr><td>Search, 250-step cap</td><td>30.7</td><td>30</td><td>36</td><td>0</td></tr>
+        <tr><td>Search, 2000-step cap</td><td>56.0</td><td>61</td><td>61</td><td>0</td></tr>
+      </tbody>
+    </table>
+    <p>Search at 2000 steps filled the board on 15 of 30 seeds and never died. The decision-time mixture survived with a score of 0.3 because the prior removes left turns: the learned Q values do not differ by 13 units, so the apple stays out of reach. DQN alone matches the greedy heuristic and stays well behind search.</p>
+
+    <h2>What plays</h2>
+    <p>The default policy searches the grid. It takes the shortest path to the apple only when the snake can follow it and still reach its tail after eating. Otherwise, on an even board, it takes the next cell of a fixed Hamiltonian cycle when the tail stays reachable. Otherwise it chases the tail, then the move that opens the most free space. The cycle fallback without the tail check killed 29 of 30 snakes by step 800. With the check, deaths dropped to zero. This search does not learn and is not connected to d3-edge.</p>
+  </article>
+
+  <section class="play-block">
+  <h2>Play</h2>
+  <p class="sub">The picture is only a display. The snake moves one cell at a time, horizontally or vertically, until the board is full or it dies.</p>
   <div class="controls">
     <label>Policy
       <select id="policy">
@@ -119,6 +179,7 @@
       <div class="log" id="log"></div>
     </aside>
   </div>
+  </section>
 </main>
 <script>
 const labels = {up:"up", down:"down", left:"left", right:"right"};

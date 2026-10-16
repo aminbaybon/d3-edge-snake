@@ -62,13 +62,13 @@ def _bfs(
             previous[nxt] = current
             if nxt == goal:
                 path = [nxt]
-                cursor = current
-                while cursor != start:
-                    path.append(cursor)
-                    parent = previous[cursor]
+                walk = current
+                while walk != start:
+                    path.append(walk)
+                    parent = previous[walk]
                     if parent is None:
                         break
-                    cursor = parent
+                    walk = parent
                 path.reverse()
                 return path
             queue.append(nxt)

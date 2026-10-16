@@ -252,6 +252,9 @@ class Handler(BaseHTTPRequestHandler):
         if path.path in ("/", "/index.html"):
             self._send(200, (ROOT / "static" / "index.html").read_bytes(), "text/html; charset=utf-8")
             return
+        if path.path == "/play.gif":
+            self._send(200, (ROOT / "assets" / "play.gif").read_bytes(), "image/gif")
+            return
         if path.path == "/board.png":
             with LOCK:
                 body = FRAME
