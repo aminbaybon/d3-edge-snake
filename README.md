@@ -1,132 +1,66 @@
 # Decision Snake
 
-Search plays the grid. The 0.8B vision model was measured, including as a teacher for Double DQN, and it made play worse.
+This is a snake game, and a record of how we chose the player that runs it.
+
+The clip is that player. It moves one cell at a time, only up, down, left, or right, and it continues until the board is full or the snake dies.
 
 ![Search playing snake, one cell at a time](assets/play.gif)
 
-Run date: 15 October 2026. Hardware: NVIDIA GeForce GTX 1650, 4 GB, compute capability 7.5, PyTorch 2.14.1+cu126.
+## What we set out to do
 
-## Result
-
-The vision model was not needed. Using its action distribution as a teacher made Double DQN worse.
-
-The rendered frame is a deterministic function of the grid. The action space is three relative moves: turn left, go straight, turn right. A 180-degree reversal is already illegal. On an 8×8 board the best decision procedure is search over that grid, not a 0.8B model looking at pixels.
-
-On seed 7, size 8:
-
-- d3-edge chose right four times and hit the wall on step 4. Score 0. Each decision took about 3.0–3.2 seconds.
-- The same seed with search, under the 400-step cap that the page used at the time, scored 39 and was still alive.
-
-The page no longer has a step cap. Search now plays until the board is full or the snake dies. The animation above is that search.
+The snake was playing badly. We wanted it to choose the best move it could. The plan was to show the rendered board to a vision model, then combine that model with reinforcement learning so the snake would improve. The clip above is the result of testing that plan. The model is still in the repository. It is no longer the player.
 
 ## The model
 
-[d3-edge](https://huggingface.co/vllm-sr/d3-edge) is a decision readout on Qwen3.5-0.8B (about 594 million parameters, BF16 weights). This GPU has no BF16 CUDA kernels, so the runtime was patched to load the backbone in float16. After loading, 1.11 GiB of GPU memory was allocated. `flash-linear-attention` and `causal_conv1d` were not installed, so the PyTorch reference kernels ran, which is why a decision takes about three seconds.
+We started with [d3-edge](https://huggingface.co/vllm-sr/d3-edge), a decision model of about 0.8 billion parameters built on Qwen3.5. Each turn we drew the board as a picture and asked the model which direction to take.
 
-All four recorded decisions had the head facing right and the apple above the head. The greedy hint was up every time. The model saw that and chose right, and the probability of right rose as the wall got closer:
+On the game we recorded, an 8×8 board with seed 7, the apple was above the head. The useful move was up. The model chose right four times and hit the wall on step 4. The score was 0. Each look took about three seconds, and its confidence in "right" rose as the wall got closer. Left was absent from every decision.
 
-| Step | up | down | right | left |
-| ---: | ---: | ---: | ---: | ---: |
-| 1 | 0.287 | 0.227 | 0.486 | absent |
-| 2 | 0.314 | 0.260 | 0.426 | absent |
-| 3 | 0.274 | 0.180 | 0.546 | absent |
-| 4 | 0.274 | 0.169 | 0.557 | absent |
+The picture was a poor input. The game already stores the position of every cell. The image is a drawing of those positions, so the model had to reconstruct a state the program already held.
 
-Left never appeared in the distribution. This is one timed episode, not a 30-seed average. Those four decisions were enough to build the teacher used below: when the food was above the head, the model walked into the right wall. The episode was recorded while the board labels were still Persian. The page and the prompts are English now; the numbers below are from that recorded run.
+We ran this on a GTX 1650 with 4 GB of memory. That GPU cannot run the model's native bfloat16 kernels, so the weights were loaded in float16. After loading, the model occupied 1.11 GB.
 
-## Action space
+## Reinforcement learning
 
-The right mapping from an observation to an action is not to give the pixels to the model.
+A snake has three legal moves: turn left, go straight, or turn right. Reversing direction is illegal. For a small set of discrete moves, Double DQN is the method that fits. It keeps every step it sees and learns from it again. Policy-gradient methods made for language models discard a step after one update. Algorithms made for continuous control, such as SAC, answer a different kind of problem.
 
-The true state is discrete and fully observed: body cells, head, apple, and heading. The picture is that state plus display noise. Reading a decision back out of pixels throws away coordinates the simulator already has.
+Training the 0.8B model itself was out of reach on this GPU. At three seconds per decision, 200,000 training steps would take about 167 hours of inference before a single learning update, and the activations for training do not fit in 4 GB. The decision layer is a readout over labeled options, so there is no policy to update from the game's score. The model stayed frozen.
 
-The action space that fits snake is the three relative moves. Four absolute headings minus the reverse heading are exactly those three moves. Both the network and the search decide in that space.
+We kept its recorded preferences and used them as a teacher in two ways.
 
-The features on which Double DQN actually learned are aligned with those moves:
+1. During training, the reward of each step was shifted toward the direction the model preferred.
+2. At decision time, the model's preference was added to the network's own score, and the snake took the move with the highest total.
 
-- three danger bits: whether left, straight, and right would die immediately
-- the current heading, one-hot
-- the sign of the apple offset on each axis
-- the apple in the head's frame, forward and to the right, divided by the board size
-- length divided by the area
+Both versions played worse than the network alone. The network trained with the model's reward averaged a score of 0.4 and died immediately. Adding the preference at decision time left the snake alive for 250 steps with a score of about 0.3, because the recorded model had given left turns almost no weight. With left turns removed, the apple stays out of reach.
 
-An MLP on the flattened grid did not learn this. Details are below.
+Double DQN on its own did learn. Over 200,000 steps, on 30 random 8×8 games, its average score was 15.9. A plain rule that steps toward the apple when the next cell is safe scored 18.3. Both are ordinary. Both still die.
 
-## Why the 0.8B model was not fine-tuned
+Two earlier training runs never got that far, and the reason is worth keeping. One reward punished eating: a new apple usually appears farther away, so the snake lost points for the action we wanted. Another showed the network the whole board as a flat list of cells, which does not say whether the next move dies. After the inputs were reduced to a few facts about the three legal moves — whether each one is blocked, where the apple sits relative to the head, and how long the snake is — the same network reached a score of about 15 within 25,000 steps. The learning method had been fine. The reward and the inputs had been wrong.
 
-Double DQN is the suitable algorithm for this game. Updating the language model is not.
+## The player in the clip
 
-- The action set is small and discrete. DQN reuses each transition. PPO and GRPO discard it after one update and need more samples on this environment.
-- SAC is for continuous actions.
-- One d3-edge decision takes about 3 seconds. 200,000 DQN steps at that rate are about 167 hours of inference, before any backward pass.
-- The float16 weights already occupy 1.11 GiB. Training activations for the vision tower and the linear-attention layers do not fit in 4 GB.
-- The decision head is a readout over labeled options, not a differentiable policy that can be updated from the snake reward.
+The default player searches the grid.
 
-The model stayed frozen. Only its recorded action distribution was passed in as a teacher. That is the combination that could actually be measured on this GPU.
+It takes the shortest path to the apple only when the snake can follow that entire path and still reach its own tail after eating. The tail check is what keeps it out of a dead end. When the path to the apple fails that test, and the board side is even, it follows a fixed loop that visits every cell, again only when the tail stays reachable. When that step is also unsafe, it moves toward its tail. The last resort is the step that leaves the most open space.
 
-## The two combinations that were run
+The loop without the tail check was lethal: 29 of 30 snakes died by step 800. With the check, deaths fell to zero.
 
-The teacher distribution is the mean of those four decisions. Left had no mass, so it was given a numerical floor of `1e-6` and the distribution was renormalized. The log of that floor is about -13.8.
+On 30 random 8×8 games, allowed to continue for up to 2000 steps, search scored 56 on average. The highest possible score is 61. The median game filled the board. Fifteen of the thirty games won. None died. The other fifteen were still alive when the step limit of that measurement stopped them. The live page has no step limit.
 
-1. Reward bonus. Each step's reward gained `0.5 * log π_d3(absolute direction)`. Action selection stayed epsilon-greedy, so the teacher did not freeze the behavior policy from the first update. 200,000 steps, the same budget as DQN alone.
+| Player | Average score | What happened |
+| --- | ---: | --- |
+| d3-edge, the recorded game | 0 | Hit the wall on step 4 |
+| DQN trained toward the model | 0.4 | Died immediately |
+| DQN plus the model's preference | 0.3 | Stayed alive and barely ate |
+| Double DQN alone | 16 | Learned a middling policy, then usually died |
+| Step toward the apple | 18 | Simple, and usually fatal |
+| Search, up to 2000 steps | 56 | No deaths. 15 of 30 boards filled |
 
-2. Decision-time mixture, on the DQN that had not seen the teacher: `argmax (Q(s, a) + 1.0 * log π_d3(a))`.
+## Where that leaves the model
 
-## Numbers
+The model was unnecessary for this game. The board is already known exactly. Passing a drawing of it through a 0.8B model produced a slow and confident mistake, and teaching a smaller network to follow that mistake lowered the score from about 16 to about 0. The snake in the clip is the search described above. Press Start on the local page and that is the policy that plays.
 
-Board 8×8. The maximum score is 61 (64 cells minus the starting length of 3). Unless noted, 30 seeds and a 250-step cap.
-
-| Policy | Mean score | Median | Max | Mean steps | Death rate | Full-board rate |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| d3-edge (seed 7 only) | 0 | 0 | 0 | 4 | 1 | 0 |
-| DQN trained with the d3 reward | 0.40 | 0 | 2 | 4.5 | 1.00 | 0 |
-| DQN plus the d3 prior at decision time | 0.30 | 0 | 1 | 250 | 0 | 0 |
-| Double DQN alone | 15.93 | 16.5 | 21 | 118.6 | 0.97 | 0 |
-| Greedy (nearest safe cell) | 18.27 | 18 | 30 | 120.2 | 1.00 | 0 |
-| Search, 250-step cap | 30.7 | 30 | 36 | 250 | 0 | 0 |
-| Search, 2000-step cap | 56.0 | 61 | 61 | until cap or win | 0 | 15 of 30 |
-
-Search is still alive at the 250-step cap; the cap cuts the game off. At 2000 steps the mean is 56, the median is 61 (a full board), the minimum is 37, and there are no deaths. Fifteen seeds filled the board. The other fifteen were still alive at step 2000 and had stalled in the endgame, not crashed.
-
-The decision-time mixture shows a death rate of zero together with a score of 0.3: the snake survives 250 steps and almost never eats. The absolute-right prior removes left turns from the action space, because the learned Q values do not differ by 13 units. Without that turn the apple is effectively out of reach.
-
-Training curves (greedy evaluation every 25,000 steps, 20 seeds, 120-step cap):
-
-- DQN alone locked onto a score of about 15 by step 25,000 and stayed there through 200,000 (15.15, 14.2, 14.2, 14.9, 15.15, 14.35, 15.0, 15.75). Death rate stayed between 0.50 and 0.80.
-- DQN with the d3 reward died immediately: score 0.30 to 0.45 and a death rate of 1 on all eight evaluations.
-
-DQN beats d3-edge and matches the greedy heuristic. It stays well behind search, and more training did not close that gap.
-
-## Two training runs that were discarded
-
-These were a bad reward and a bad observation, not the final result.
-
-- The potential `γΦ(s') − Φ(s)` with `Φ = −Manhattan distance`, including the step that eats the apple. The next apple is usually farther away, so eating scores about −6 and cancels the +1 apple reward. On a flattened grid the mean scores from 25k to 100k steps were 2.2, 3.1, 3.0, 3.3. The death rate rose from 0.70 to 0.90.
-- The corrected reward (apple +1, death −1, and a 0.05 step toward the food only between apples) still with an MLP on the 192-dimensional grid. Through 75k steps the scores were 2.10, 2.15, 2.40.
-
-After the observation was changed to the action-aligned features, the same network reached a score of 15 by step 25,000. The difference was not the algorithm. The raw grid does not tell the network whether the next action dies.
-
-## The search that plays now
-
-The page default is `plan`.
-
-1. Shortest path to the apple, accepted only when the snake can follow every cell and can still reach its tail after eating. That rejects dead-end coils.
-2. If that path is unsafe and the board has an even side, the next cell of a fixed Hamiltonian cycle, and only if the tail is still reachable after that step.
-3. Otherwise chase the tail, and finally take the move that opens the most free space.
-
-The cycle fallback without the tail check killed the snake (29 deaths out of 30 by step 800). With the check, deaths dropped to zero.
-
-This search does not learn and is not connected to d3-edge. On a small fully observed board it is a better policy than a small network that has seen 200,000 transitions.
-
-## Was the model necessary?
-
-No.
-
-The exact state is already in the simulator. The model is a multimodal classifier that maps a rendered frame to a distribution over labels. On the recorded episode that distribution leaned into the right wall, assigned nothing to left, and became more confident as the wall approached. Feeding that distribution into DQN, either as a reward or as an addition to Q, took the score from about 16 back to about 0.
-
-What plays the game well is search on the grid. Double DQN on the relative action space learns a middling policy, comparable to the greedy heuristic, and is not required at this board size. d3-edge did not add a policy, a teacher, or a feature that the search did not already have.
-
-## Run
+## Run it
 
 ```powershell
 python -m venv .venv
@@ -135,14 +69,10 @@ python -m venv .venv
 .\.venv\Scripts\python app.py
 ```
 
-Open [http://127.0.0.1:7860](http://127.0.0.1:7860). Choose Search, Double DQN, Greedy, or d3-edge. Search does not use a step cap.
+Open [http://127.0.0.1:7860](http://127.0.0.1:7860). Search is selected by default. Double DQN, the greedy rule, and d3-edge are in the same menu. d3-edge needs `transformers==5.17.0` and takes a few seconds per move.
 
-One headless game, also with no step cap:
+One game from the terminal, with no step limit:
 
 ```powershell
 .\.venv\Scripts\python app.py --episode --policy plan --seed 7 --size 8
 ```
-
-d3-edge needs `transformers==5.17.0` because the checkpoint is a Qwen3.5 readout. On a GTX 1650 the runtime is loaded in float16. Each model decision takes a few seconds.
-
-The same write-up is in [REPORT.md](REPORT.md).
